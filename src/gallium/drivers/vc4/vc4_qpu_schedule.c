@@ -565,7 +565,7 @@ get_instruction_priority(uint64_t inst)
 static struct schedule_node *
 choose_instruction_to_schedule(struct choose_scoreboard *scoreboard,
                                struct list_head *schedule_list,
-                               struct schedule_node *prev_inst)
+                               struct schedule_node *prev_inst,bool* could_branch)
 {
         struct schedule_node *chosen = NULL;
         int chosen_prio = 0;
@@ -574,13 +574,14 @@ choose_instruction_to_schedule(struct choose_scoreboard *scoreboard,
                 uint64_t inst = n->inst->inst;
 
                 /* Don't choose the branch instruction until it's the last one
-                 * left.  XXX: We could potentially choose it before it's the
-                 * last one, if the remaining instructions fit in the delay
-                 * slots.
+                 * left. Mark, when it could be chosen before the last one.
+				 * This marks the first position the branch instruction's
+				 * dependencies are fullfiled.
                  */
-                if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_BRANCH &&
-                    !list_is_singular(schedule_list)) {
-                        continue;
+                if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_BRANCH ) {
+					*could_branch = true;
+					if (!list_is_singular(schedule_list))
+						continue;
                 }
 
                 /* "An instruction must not read from a location in physical
@@ -806,6 +807,9 @@ schedule_instructions(struct vc4_compile *c,
 {
         uint32_t time = 0;
 
+		uint32_t min_branch_position = -1;
+		int last_thread_switch = -3;
+
         if (debug) {
                 fprintf(stderr, "initial deps:\n");
                 dump_state(schedule_list);
@@ -819,10 +823,15 @@ schedule_instructions(struct vc4_compile *c,
         }
 
         while (!list_empty(schedule_list)) {
+				bool can_branch = false;
                 struct schedule_node *chosen =
                         choose_instruction_to_schedule(scoreboard,
                                                        schedule_list,
-                                                       NULL);
+                                                       NULL,
+													   &can_branch);
+				if (can_branch)
+					min_branch_position = MIN2(c->qpu_inst_count, 
+											   min_branch_position);
                 struct schedule_node *merge = NULL;
 
                 /* If there are no valid instructions to schedule, drop a NOP
@@ -857,7 +866,10 @@ schedule_instructions(struct vc4_compile *c,
 
                         merge = choose_instruction_to_schedule(scoreboard,
                                                                schedule_list,
-                                                               chosen);
+                                                               chosen,
+															   &can_branch);
+						/* No need to check for branching, if we could, 
+						 * we could have before, so no change */
                         if (merge) {
                                 time = MAX2(merge->unblocked_time, time);
                                 list_del(&merge->link);
@@ -904,19 +916,30 @@ schedule_instructions(struct vc4_compile *c,
 
                 if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_BRANCH) {
                         block->branch_qpu_ip = c->qpu_inst_count - 1;
-                        /* Fill the delay slots.
-                         *
-                         * We should fill these with actual instructions,
-                         * instead, but that will probably need to be done
-                         * after this, once we know what the leading
-                         * instructions of the successors are (so we can
-                         * handle A/B register file write latency)
-                        */
-                        inst = qpu_NOP();
-                        update_scoreboard_for_chosen(scoreboard, inst);
-                        qpu_serialize_one_inst(c, inst);
-                        qpu_serialize_one_inst(c, inst);
-                        qpu_serialize_one_inst(c, inst);
+                        /* Shift the branch upwards or fill the delay slots.
+                         * Check for a possible read-after-write conflict.
+						 * if present, shift the branch instruction about
+						 * a maximum of two slots up, else three slots 
+						 */
+						uint64_t last_inst = c->qpu_insts[c->qpu_inst_count - 2];
+						bool possible_wr_conflict =
+							QPU_GET_FIELD(last_inst, QPU_WADDR_ADD) < 32 ||
+							QPU_GET_FIELD(last_inst, QPU_WADDR_MUL) < 32;
+						int cycle_count = MIN2(
+							c->qpu_inst_count - min_branch_position - 1, 
+							possible_wr_conflict ? 3 : 2);
+						/* Shift the instructions downwards*/
+						for (int i = 0; i < cycle_count; ++i)
+							c->qpu_insts[c->qpu_inst_count - i - 1] = 
+								c->qpu_insts[c->qpu_inst_count - i - 2];
+						/* Put the branch in the freed slot */
+						c->qpu_insts[c->qpu_inst_count - cycle_count - 1] = inst;
+						/* if not rotated to the maximum, fill NOPs,  */
+						for (int i = 0; i < 3 - cycle_count; ++i) {
+							update_scoreboard_for_chosen(scoreboard, qpu_NOP());
+							qpu_serialize_one_inst(c, qpu_NOP());
+						}
+                        
                 } else if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_THREAD_SWITCH ||
                            QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_LAST_THREAD_SWITCH) {
                         /* The thread switch occurs after two delay slots.  We
