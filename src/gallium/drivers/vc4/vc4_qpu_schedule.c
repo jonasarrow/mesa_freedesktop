@@ -555,7 +555,7 @@ get_instruction_priority(uint64_t inst)
         next_score++;
 
         /* Schedule earlier, as might be a branch condition, allowing a
-                * better branch latency hiding */
+         * better branch latency hiding */
         if (inst & QPU_SF)
                 return next_score;
         next_score++;
@@ -829,15 +829,15 @@ schedule_instructions(struct vc4_compile *c,
         }
 
         while (!list_empty(schedule_list)) {
-				bool can_branch = false;
+                bool can_branch = false;
                 struct schedule_node *chosen =
                         choose_instruction_to_schedule(scoreboard,
-                                                       schedule_list,
-                                                       NULL,
-													   &can_branch);
-				if (can_branch)
-					min_branch_position = MIN2(c->qpu_inst_count, 
-											   min_branch_position);
+                                schedule_list,
+                                NULL,
+                                &can_branch);
+                if (can_branch)
+                        min_branch_position = MIN2(c->qpu_inst_count,
+                                min_branch_position);
                 struct schedule_node *merge = NULL;
 
                 /* If there are no valid instructions to schedule, drop a NOP
@@ -861,7 +861,7 @@ schedule_instructions(struct vc4_compile *c,
                         time = MAX2(chosen->unblocked_time, time);
                         list_del(&chosen->link);
                         mark_instruction_scheduled(schedule_list, time,
-                                                   chosen, true);
+                                chosen, true);
                         if (chosen->uniform != -1) {
                                 c->uniform_data[*next_uniform] =
                                         orig_uniform_data[chosen->uniform];
@@ -871,11 +871,11 @@ schedule_instructions(struct vc4_compile *c,
                         }
 
                         merge = choose_instruction_to_schedule(scoreboard,
-                                                               schedule_list,
-                                                               chosen,
-															   &can_branch);
-						/* No need to check for branching, if we could, 
-						 * we could have before, so no change */
+                                schedule_list,
+                                chosen,
+                                &can_branch);
+                        /* No need to check for branching, if we could,
+                         * we could have before, so no change */
                         if (merge) {
                                 time = MAX2(merge->unblocked_time, time);
                                 list_del(&merge->link);
@@ -933,13 +933,16 @@ schedule_instructions(struct vc4_compile *c,
                                 QPU_GET_FIELD(last_inst, QPU_WADDR_MUL) < 32;
                         int cycle_count = MIN2(
                                 c->qpu_inst_count - min_branch_position - 1,
-                                possible_wr_conflict ? 3 : 2);
-                        /* Shift the instructions downwards*/
-                        for (int i = 0; i < cycle_count; ++i)
-                                c->qpu_insts[c->qpu_inst_count - i - 1] =
-                                c->qpu_insts[c->qpu_inst_count - i - 2];
-                        /* Put the branch in the freed slot */
-                        c->qpu_insts[c->qpu_inst_count - cycle_count - 1] = inst;
+                                possible_wr_conflict ? 2 : 3);
+                        if (cycle_count) {
+                                /* Shift the instructions downwards*/
+                                for (int i = 0; i < cycle_count; ++i)
+                                        c->qpu_insts[c->qpu_inst_count - i - 1] =
+                                        c->qpu_insts[c->qpu_inst_count - i - 2];
+                                /* Put the branch in the freed slot */
+                                c->qpu_insts[c->qpu_inst_count - cycle_count - 1] = inst;
+                                block->branch_qpu_ip = c->qpu_inst_count - cycle_count - 1;
+                        }
                         /* if not rotated to the maximum, fill NOPs,  */
                         for (int i = 0; i < 3 - cycle_count; ++i) {
                                 update_scoreboard_for_chosen(scoreboard, qpu_NOP());
@@ -956,7 +959,6 @@ schedule_instructions(struct vc4_compile *c,
                          */
 
                          /* Remove sig from the instruction */
-                        enum qpu_sig_bits sig = QPU_GET_FIELD(inst, QPU_SIG);
                         c->qpu_insts[c->qpu_inst_count - 1] = QPU_UPDATE_FIELD(
                                 c->qpu_insts[c->qpu_inst_count - 1],
                                 QPU_SIG_NONE,
@@ -985,7 +987,7 @@ schedule_instructions(struct vc4_compile *c,
                                 qpu_serialize_one_inst(c, inst);
                         }
                         /* Avoid branching in a thread switch*/
-                        min_branch_position = c->qpu_inst_count - 1;
+                        min_branch_position = c->qpu_inst_count;
                         last_thread_switch = c->qpu_inst_count - 1;
                 }
         }
