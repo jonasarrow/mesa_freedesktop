@@ -554,6 +554,12 @@ get_instruction_priority(uint64_t inst)
         baseline_score = next_score;
         next_score++;
 
+        /* Schedule earlier, as might be a branch condition, allowing a
+                * better branch latency hiding */
+        if (inst & QPU_SF)
+                return next_score;
+        next_score++;
+
         /* Schedule texture read setup early to hide their latency better. */
         if (is_tmu_write(waddr_add) || is_tmu_write(waddr_mul))
                 return next_score;
@@ -918,68 +924,69 @@ schedule_instructions(struct vc4_compile *c,
                         block->branch_qpu_ip = c->qpu_inst_count - 1;
                         /* Shift the branch upwards or fill the delay slots.
                          * Check for a possible read-after-write conflict.
-						 * if present, shift the branch instruction about
-						 * a maximum of two slots up, else three slots 
-						 */
-						uint64_t last_inst = c->qpu_insts[c->qpu_inst_count - 2];
-						bool possible_wr_conflict =
-							QPU_GET_FIELD(last_inst, QPU_WADDR_ADD) < 32 ||
-							QPU_GET_FIELD(last_inst, QPU_WADDR_MUL) < 32;
-						int cycle_count = MIN2(
-							c->qpu_inst_count - min_branch_position - 1, 
-							possible_wr_conflict ? 3 : 2);
-						/* Shift the instructions downwards*/
-						for (int i = 0; i < cycle_count; ++i)
-							c->qpu_insts[c->qpu_inst_count - i - 1] = 
-								c->qpu_insts[c->qpu_inst_count - i - 2];
-						/* Put the branch in the freed slot */
-						c->qpu_insts[c->qpu_inst_count - cycle_count - 1] = inst;
-						/* if not rotated to the maximum, fill NOPs,  */
-						for (int i = 0; i < 3 - cycle_count; ++i) {
-							update_scoreboard_for_chosen(scoreboard, qpu_NOP());
-							qpu_serialize_one_inst(c, qpu_NOP());
-						}
-                        
-                } else if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_THREAD_SWITCH ||
-                           QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_LAST_THREAD_SWITCH) {
+                         * if present, shift the branch instruction about
+                         * a maximum of two slots up, else three slots
+                         */
+                        uint64_t last_inst = c->qpu_insts[c->qpu_inst_count - 2];
+                        bool possible_wr_conflict =
+                                QPU_GET_FIELD(last_inst, QPU_WADDR_ADD) < 32 ||
+                                QPU_GET_FIELD(last_inst, QPU_WADDR_MUL) < 32;
+                        int cycle_count = MIN2(
+                                c->qpu_inst_count - min_branch_position - 1,
+                                possible_wr_conflict ? 3 : 2);
+                        /* Shift the instructions downwards*/
+                        for (int i = 0; i < cycle_count; ++i)
+                                c->qpu_insts[c->qpu_inst_count - i - 1] =
+                                c->qpu_insts[c->qpu_inst_count - i - 2];
+                        /* Put the branch in the freed slot */
+                        c->qpu_insts[c->qpu_inst_count - cycle_count - 1] = inst;
+                        /* if not rotated to the maximum, fill NOPs,  */
+                        for (int i = 0; i < 3 - cycle_count; ++i) {
+                                update_scoreboard_for_chosen(scoreboard, qpu_NOP());
+                                qpu_serialize_one_inst(c, qpu_NOP());
+                        }
+
+                }
+                else if (QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_THREAD_SWITCH ||
+                        QPU_GET_FIELD(inst, QPU_SIG) == QPU_SIG_LAST_THREAD_SWITCH) {
                         /* The thread switch occurs after two delay slots.
-						 * Shift the signal upwards, if there is an instruction without
-						 * a signal there. Watch out for the last thread switch as 
-						 * theoretically it could be only two instructions away.
+                         * Shift the signal upwards, if there is an instruction without
+                         * a signal there. Watch out for the last thread switch as
+                         * theoretically it could be only two instructions away.
                          */
 
-						/* Remove sig from the instruction */
-						enum qpu_sig_bits sig = QPU_GET_FIELD(inst, QPU_SIG);
-						QPU_UPDATE_FIELD(
-							c->qpu_insts[c->qpu_inst_count - 1],
-							QPU_SIG_NONE,
-							QPU_SIG);
-						/* Compute how far we can shift */
-						int max_shift = MIN2(
-							c->qpu_inst_count - 1 - last_thread_switch, 2);
-						/* If both instructions in front have a signal set,
-						 * reset the signal on the current instruction.*/
-						int shift = max_shift;
-						for (; shift >= 0; --shift) {
-							if (QPU_GET_FIELD(
-									c->qpu_insts[c->qpu_inst_count - 1 - shift], QPU_SIG)
-								== QPU_SIG_NONE) {
-								c->qpu_insts[c->qpu_inst_count - 1 - shift] =
-									QPU_UPDATE_FIELD(
-										c->qpu_insts[c->qpu_inst_count - 1 - shift],
-										QPU_GET_FIELD(inst, QPU_SIG),
-										QPU_SIG);
-								break;
-							}
-						}
-						/* If necessarry, add filling NOPs*/
-						for (int i = 0; i < 2 - shift; ++i) {
-							update_scoreboard_for_chosen(scoreboard, qpu_NOP());
-							qpu_serialize_one_inst(c, inst);
-						}
-						/* Avoid branching in a thread switch*/
-						min_branch_position = c->qpu_inst_count - 1;
-						last_thread_switch = c->qpu_inst_count - 1;
+                         /* Remove sig from the instruction */
+                        enum qpu_sig_bits sig = QPU_GET_FIELD(inst, QPU_SIG);
+                        c->qpu_insts[c->qpu_inst_count - 1] = QPU_UPDATE_FIELD(
+                                c->qpu_insts[c->qpu_inst_count - 1],
+                                QPU_SIG_NONE,
+                                QPU_SIG);
+                        /* Compute how far we can shift */
+                        int max_shift = MIN2(
+                                c->qpu_inst_count - 1 - last_thread_switch, 2);
+                        /* If both instructions in front have a signal set,
+                         * reset the signal on the current instruction.*/
+                        int shift = max_shift;
+                        for (; shift >= 0; --shift) {
+                                if (QPU_GET_FIELD(
+                                        c->qpu_insts[c->qpu_inst_count - 1 - shift], QPU_SIG)
+                                        == QPU_SIG_NONE) {
+                                        c->qpu_insts[c->qpu_inst_count - 1 - shift] =
+                                                QPU_UPDATE_FIELD(
+                                                        c->qpu_insts[c->qpu_inst_count - 1 - shift],
+                                                        QPU_GET_FIELD(inst, QPU_SIG),
+                                                        QPU_SIG);
+                                        break;
+                                }
+                        }
+                        /* If necessarry, add filling NOPs*/
+                        for (int i = 0; i < 2 - shift; ++i) {
+                                update_scoreboard_for_chosen(scoreboard, qpu_NOP());
+                                qpu_serialize_one_inst(c, inst);
+                        }
+                        /* Avoid branching in a thread switch*/
+                        min_branch_position = c->qpu_inst_count - 1;
+                        last_thread_switch = c->qpu_inst_count - 1;
                 }
         }
 
