@@ -201,70 +201,6 @@ enum intel_msaa_layout
    INTEL_MSAA_LAYOUT_CMS,
 };
 
-
-/**
- * Enum for keeping track of the fast clear state of a buffer associated with
- * a miptree.
- *
- * Fast clear works by deferring the memory writes that would be used to clear
- * the buffer, so that instead of performing them at the time of the clear
- * operation, the hardware automatically performs them at the time that the
- * buffer is later accessed for rendering.  The MCS buffer keeps track of
- * which regions of the buffer still have pending clear writes.
- *
- * This enum keeps track of the driver's knowledge of pending fast clears in
- * the MCS buffer.
- *
- * MCS buffers only exist on Gen7+.
- */
-enum intel_fast_clear_state
-{
-   /**
-    * There is no MCS buffer for this miptree, and one should never be
-    * allocated.
-    */
-   INTEL_FAST_CLEAR_STATE_NO_MCS,
-
-   /**
-    * No deferred clears are pending for this miptree, and the contents of the
-    * color buffer are entirely correct.  An MCS buffer may or may not exist
-    * for this miptree.  If it does exist, it is entirely in the "no deferred
-    * clears pending" state.  If it does not exist, it will be created the
-    * first time a fast color clear is executed.
-    *
-    * In this state, the color buffer can be used for purposes other than
-    * rendering without needing a render target resolve.
-    *
-    * Since there is no such thing as a "fast color clear resolve" for MSAA
-    * buffers, an MSAA buffer will never be in this state.
-    */
-   INTEL_FAST_CLEAR_STATE_RESOLVED,
-
-   /**
-    * An MCS buffer exists for this miptree, and deferred clears are pending
-    * for some regions of the color buffer, as indicated by the MCS buffer.
-    * The contents of the color buffer are only correct for the regions where
-    * the MCS buffer doesn't indicate a deferred clear.
-    *
-    * If a single-sample buffer is in this state, a render target resolve must
-    * be performed before it can be used for purposes other than rendering.
-    */
-   INTEL_FAST_CLEAR_STATE_UNRESOLVED,
-
-   /**
-    * An MCS buffer exists for this miptree, and deferred clears are pending
-    * for the entire color buffer, and the contents of the MCS buffer reflect
-    * this.  The contents of the color buffer are undefined.
-    *
-    * If a single-sample buffer is in this state, a render target resolve must
-    * be performed before it can be used for purposes other than rendering.
-    *
-    * If the client attempts to clear a buffer which is already in this state,
-    * the clear can be safely skipped, since the buffer is already clear.
-    */
-   INTEL_FAST_CLEAR_STATE_CLEAR,
-};
-
 enum miptree_array_layout {
    /* Each array slice contains all miplevels packed together.
     *
@@ -618,15 +554,22 @@ struct intel_mipmap_tree
    struct intel_miptree_hiz_buffer *hiz_buf;
 
    /**
-    * \brief Map of miptree slices to needed resolves.
+    * \brief Maps of miptree slices to needed resolves.
     *
-    * This is used only when the miptree has a child HiZ miptree.
+    * hiz_map is used only when the miptree has a child HiZ miptree.
     *
     * Let \c mt be a depth miptree with HiZ enabled. Then the resolve map is
     * \c mt->hiz_map. The resolve map of the child HiZ miptree, \c
     * mt->hiz_mt->hiz_map, is unused.
+    *
+    *
+    * color_resolve_map is used only when the miptree uses fast clear (Gen7+)
+    * lossless compression (Gen9+). It should be noted that absence in the
+    * map means implicitly RESOLVED state. If item is found it always
+    * indicates state other than RESOLVED.
     */
    struct exec_list hiz_map; /* List of intel_resolve_map. */
+   struct exec_list color_resolve_map; /* List of intel_resolve_map. */
 
    /**
     * \brief Stencil miptree for depthstencil textures.
@@ -670,11 +613,6 @@ struct intel_mipmap_tree
    struct intel_mipmap_tree *plane[2];
 
    /**
-    * Fast clear state for this buffer.
-    */
-   enum intel_fast_clear_state fast_clear_state;
-
-   /**
     * The SURFACE_STATE bits associated with the last fast color clear to this
     * color mipmap tree, if any.
     *
@@ -703,6 +641,12 @@ struct intel_mipmap_tree
    bool disable_aux_buffers;
 
    /**
+    * Fast clear and lossless compression are always disabled for this
+    * miptree.
+    */
+   bool no_ccs;
+
+   /**
     * Tells if the underlying buffer is to be also consumed by entities other
     * than the driver. This allows logic to turn off features such as lossless
     * compression which is not currently understood by client applications.
@@ -713,10 +657,6 @@ struct intel_mipmap_tree
     */
    GLuint refcount;
 };
-
-void
-intel_get_non_msrt_mcs_alignment(const struct intel_mipmap_tree *mt,
-                                 unsigned *width_px, unsigned *height);
 
 bool
 intel_miptree_is_lossless_compressed(const struct brw_context *brw,
@@ -805,7 +745,7 @@ intel_lower_compressed_format(struct brw_context *brw, mesa_format format);
 
 /** \brief Assert that the level and layer are valid for the miptree. */
 static inline void
-intel_miptree_check_level_layer(struct intel_mipmap_tree *mt,
+intel_miptree_check_level_layer(const struct intel_mipmap_tree *mt,
                                 uint32_t level,
                                 uint32_t layer)
 {
@@ -962,20 +902,31 @@ intel_miptree_all_slices_resolve_depth(struct brw_context *brw,
 
 /**\}*/
 
+enum intel_fast_clear_state
+intel_miptree_get_fast_clear_state(const struct intel_mipmap_tree *mt,
+                                   unsigned level, unsigned layer);
+
+void
+intel_miptree_set_fast_clear_state(const struct brw_context *brw,
+                                   struct intel_mipmap_tree *mt,
+                                   unsigned level,
+                                   unsigned first_layer,
+                                   unsigned num_layers,
+                                   enum intel_fast_clear_state new_state);
+
+bool
+intel_miptree_has_color_unresolved(const struct intel_mipmap_tree *mt,
+                                   unsigned start_level, unsigned num_levels,
+                                   unsigned start_layer, unsigned num_layers);
+
 /**
  * Update the fast clear state for a miptree to indicate that it has been used
  * for rendering.
  */
-static inline void
-intel_miptree_used_for_rendering(struct intel_mipmap_tree *mt)
-{
-   /* If the buffer was previously in fast clear state, change it to
-    * unresolved state, since it won't be guaranteed to be clear after
-    * rendering occurs.
-    */
-   if (mt->fast_clear_state == INTEL_FAST_CLEAR_STATE_CLEAR)
-      mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_UNRESOLVED;
-}
+void
+intel_miptree_used_for_rendering(const struct brw_context *brw,
+                                 struct intel_mipmap_tree *mt, unsigned level,
+                                 unsigned start_layer, unsigned num_layers);
 
 /**
  * Flag values telling color resolve pass which special types of buffers
@@ -988,8 +939,14 @@ intel_miptree_used_for_rendering(struct intel_mipmap_tree *mt)
 
 bool
 intel_miptree_resolve_color(struct brw_context *brw,
-                            struct intel_mipmap_tree *mt,
+                            struct intel_mipmap_tree *mt, unsigned level,
+                            unsigned start_layer, unsigned num_layers,
                             int flags);
+
+void
+intel_miptree_all_slices_resolve_color(struct brw_context *brw,
+                                       struct intel_mipmap_tree *mt,
+                                       int flags);
 
 void
 intel_miptree_make_shareable(struct brw_context *brw,

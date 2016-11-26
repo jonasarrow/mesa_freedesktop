@@ -153,6 +153,19 @@ anv_clear_mask(uint32_t *inout_mask, uint32_t clear_mask)
    }
 }
 
+static inline union isl_color_value
+vk_to_isl_color(VkClearColorValue color)
+{
+   return (union isl_color_value) {
+      .u32 = {
+         color.uint32[0],
+         color.uint32[1],
+         color.uint32[2],
+         color.uint32[3],
+      },
+   };
+}
+
 #define for_each_bit(b, dword)                          \
    for (uint32_t __dword = (dword);                     \
         (b) = __builtin_ffs(__dword) - 1, __dword;      \
@@ -913,6 +926,9 @@ struct anv_pipeline_binding {
 
    /* Index in the binding */
    uint8_t index;
+
+   /* Input attachment index (relative to the subpass) */
+   uint8_t input_attachment_index;
 };
 
 struct anv_pipeline_layout {
@@ -1084,10 +1100,14 @@ void anv_dynamic_state_copy(struct anv_dynamic_state *dest,
  */
 struct anv_attachment_state {
    enum isl_aux_usage                           aux_usage;
+   enum isl_aux_usage                           input_aux_usage;
    struct anv_state                             color_rt_state;
+   struct anv_state                             input_att_state;
 
    VkImageAspectFlags                           pending_clear_aspects;
+   bool                                         fast_clear;
    VkClearValue                                 clear_value;
+   bool                                         clear_color_is_zero_one;
 };
 
 /** State required while building cmd buffer */
@@ -1708,6 +1728,9 @@ struct anv_subpass {
    uint32_t *                                   resolve_attachments;
    uint32_t                                     depth_stencil_attachment;
 
+   /** Subpass has a depth/stencil self-dependency */
+   bool                                         has_ds_self_dep;
+
    /** Subpass has at least one resolve attachment */
    bool                                         has_resolve;
 };
@@ -1722,6 +1745,7 @@ enum anv_subpass_usage {
 struct anv_render_pass_attachment {
    VkFormat                                     format;
    uint32_t                                     samples;
+   VkImageUsageFlags                            usage;
    VkAttachmentLoadOp                           load_op;
    VkAttachmentStoreOp                          store_op;
    VkAttachmentLoadOp                           stencil_load_op;

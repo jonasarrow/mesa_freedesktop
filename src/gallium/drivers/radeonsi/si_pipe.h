@@ -167,6 +167,7 @@ struct si_framebuffer {
 	unsigned			nr_samples;
 	unsigned			log_samples;
 	unsigned			compressed_cb_mask;
+	unsigned			colorbuf_enabled_4bit;
 	unsigned			spi_shader_col_format;
 	unsigned			spi_shader_col_format_alpha;
 	unsigned			spi_shader_col_format_blend;
@@ -336,6 +337,7 @@ struct si_context {
 	struct si_shader_selector *last_tcs;
 	int			last_num_tcs_input_cp;
 	int			last_tes_sh_base;
+	unsigned		last_num_patches;
 
 	/* Debug state. */
 	bool			is_debug;
@@ -462,9 +464,9 @@ static inline struct si_shader* si_get_vs_state(struct si_context *sctx)
 static inline bool si_vs_exports_prim_id(struct si_shader *shader)
 {
 	if (shader->selector->type == PIPE_SHADER_VERTEX)
-		return shader->key.vs.epilog.export_prim_id;
+		return shader->key.part.vs.epilog.export_prim_id;
 	else if (shader->selector->type == PIPE_SHADER_TESS_EVAL)
-		return shader->key.tes.epilog.export_prim_id;
+		return shader->key.part.tes.epilog.export_prim_id;
 	else
 		return false;
 }

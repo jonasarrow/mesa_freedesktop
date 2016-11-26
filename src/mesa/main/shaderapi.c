@@ -59,6 +59,7 @@
 #include "util/ralloc.h"
 #include "util/hash_table.h"
 #include "util/mesa-sha1.h"
+#include "util/crc32.h"
 
 /**
  * Return mask of GLSL_x flags by examining the MESA_GLSL env var.
@@ -992,7 +993,7 @@ shader_source(struct gl_shader *sh, const GLchar *source)
    free((void *)sh->Source);
    sh->Source = source;
 #ifdef DEBUG
-   sh->SourceChecksum = _mesa_str_checksum(sh->Source);
+   sh->SourceChecksum = util_hash_crc32(sh->Source, strlen(sh->Source));
 #endif
 }
 
@@ -1148,10 +1149,16 @@ print_shader_info(const struct gl_shader_program *shProg)
 
    printf("Mesa: glUseProgram(%u)\n", shProg->Name);
    for (i = 0; i < shProg->NumShaders; i++) {
+#ifdef DEBUG
       printf("  %s shader %u, checksum %u\n",
              _mesa_shader_stage_to_string(shProg->Shaders[i]->Stage),
 	     shProg->Shaders[i]->Name,
 	     shProg->Shaders[i]->SourceChecksum);
+#else
+      printf("  %s shader %u\n",
+             _mesa_shader_stage_to_string(shProg->Shaders[i]->Stage),
+             shProg->Shaders[i]->Name);
+#endif
    }
    if (shProg->_LinkedShaders[MESA_SHADER_VERTEX])
       printf("  vert prog %u\n",

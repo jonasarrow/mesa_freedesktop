@@ -101,66 +101,6 @@ compute_msaa_layout(struct brw_context *brw, mesa_format format,
    }
 }
 
-
-/**
- * For single-sampled render targets ("non-MSRT"), the MCS buffer is a
- * scaled-down bitfield representation of the color buffer which is capable of
- * recording when blocks of the color buffer are equal to the clear value.
- * This function returns the block size that will be used by the MCS buffer
- * corresponding to a certain color miptree.
- *
- * From the Ivy Bridge PRM, Vol2 Part1 11.7 "MCS Buffer for Render Target(s)",
- * beneath the "Fast Color Clear" bullet (p327):
- *
- *     The following table describes the RT alignment
- *
- *                       Pixels  Lines
- *         TiledY RT CL
- *             bpp
- *              32          8      4
- *              64          4      4
- *             128          2      4
- *         TiledX RT CL
- *             bpp
- *              32         16      2
- *              64          8      2
- *             128          4      2
- *
- * This alignment has the following uses:
- *
- * - For figuring out the size of the MCS buffer.  Each 4k tile in the MCS
- *   buffer contains 128 blocks horizontally and 256 blocks vertically.
- *
- * - For figuring out alignment restrictions for a fast clear operation.  Fast
- *   clear operations must always clear aligned multiples of 16 blocks
- *   horizontally and 32 blocks vertically.
- *
- * - For scaling down the coordinates sent through the render pipeline during
- *   a fast clear.  X coordinates must be scaled down by 8 times the block
- *   width, and Y coordinates by 16 times the block height.
- *
- * - For scaling down the coordinates sent through the render pipeline during
- *   a "Render Target Resolve" operation.  X coordinates must be scaled down
- *   by half the block width, and Y coordinates by half the block height.
- */
-void
-intel_get_non_msrt_mcs_alignment(const struct intel_mipmap_tree *mt,
-                                 unsigned *width_px, unsigned *height)
-{
-   switch (mt->tiling) {
-   default:
-      unreachable("Non-MSRT MCS requires X or Y tiling");
-      /* In release builds, fall through */
-   case I915_TILING_Y:
-      *width_px = 32 / mt->cpp;
-      *height = 4;
-      break;
-   case I915_TILING_X:
-      *width_px = 64 / mt->cpp;
-      *height = 2;
-   }
-}
-
 bool
 intel_tiling_supports_non_msrt_mcs(const struct brw_context *brw,
                                    unsigned tiling)
@@ -226,32 +166,40 @@ intel_miptree_supports_non_msrt_fast_clear(struct brw_context *brw,
 
    if (mt->cpp != 4 && mt->cpp != 8 && mt->cpp != 16)
       return false;
-   if (mt->first_level != 0 || mt->last_level != 0) {
-      if (brw->gen >= 8) {
-         perf_debug("Multi-LOD fast clear - giving up (%dx%dx%d).\n",
-                    mt->logical_width0, mt->logical_height0, mt->last_level);
-      }
 
-      return false;
-   }
+   const bool mip_mapped = mt->first_level != 0 || mt->last_level != 0;
+   const bool arrayed = mt->physical_depth0 != 1;
 
-   /* Check for layered surfaces. */
-   if (mt->physical_depth0 != 1) {
+   if (arrayed) {
        /* Multisample surfaces with the CMS layout are not layered surfaces,
         * yet still have physical_depth0 > 1. Assert that we don't
         * accidentally reject a multisampled surface here. We should have
         * rejected it earlier by explicitly checking the sample count.
         */
       assert(mt->num_samples <= 1);
-
-      if (brw->gen >= 8) {
-         perf_debug("Layered fast clear - giving up. (%dx%d%d)\n",
-                    mt->logical_width0, mt->logical_height0,
-                    mt->physical_depth0);
-      }
-
-      return false;
    }
+
+   /* Handle the hardware restrictions...
+    *
+    * All GENs have the following restriction: "MCS buffer for non-MSRT is
+    * supported only for RT formats 32bpp, 64bpp, and 128bpp."
+    *
+    * From the HSW PRM Volume 7: 3D-Media-GPGPU, page 652: (Color Clear of
+    * Non-MultiSampler Render Target Restrictions) Support is for
+    * non-mip-mapped and non-array surface types only.
+    *
+    * From the BDW PRM Volume 7: 3D-Media-GPGPU, page 649: (Color Clear of
+    * Non-MultiSampler Render Target Restriction). Mip-mapped and arrayed
+    * surfaces are supported with MCS buffer layout with these alignments in
+    * the RT space: Horizontal Alignment = 256 and Vertical Alignment = 128.
+    *
+    * From the SKL PRM Volume 7: 3D-Media-GPGPU, page 632: (Color Clear of
+    * Non-MultiSampler Render Target Restriction). Mip-mapped and arrayed
+    * surfaces are supported with MCS buffer layout with these alignments in
+    * the RT space: Horizontal Alignment = 128 and Vertical Alignment = 64.
+    */
+   if (brw->gen < 8 && (mip_mapped || arrayed))
+      return false;
 
    /* There's no point in using an MCS buffer if the surface isn't in a
     * renderable format.
@@ -374,10 +322,11 @@ intel_miptree_create_layout(struct brw_context *brw,
    mt->logical_width0 = width0;
    mt->logical_height0 = height0;
    mt->logical_depth0 = depth0;
-   mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_NO_MCS;
    mt->disable_aux_buffers = (layout_flags & MIPTREE_LAYOUT_DISABLE_AUX) != 0;
+   mt->no_ccs = true;
    mt->is_scanout = (layout_flags & MIPTREE_LAYOUT_FOR_SCANOUT) != 0;
    exec_list_make_empty(&mt->hiz_map);
+   exec_list_make_empty(&mt->color_resolve_map);
    mt->cpp = _mesa_get_format_bytes(format);
    mt->num_samples = num_samples;
    mt->compressed = _mesa_is_format_compressed(format);
@@ -787,7 +736,7 @@ intel_miptree_create(struct brw_context *brw,
     */
    if (intel_tiling_supports_non_msrt_mcs(brw, mt->tiling) &&
        intel_miptree_supports_non_msrt_fast_clear(brw, mt)) {
-      mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_RESOLVED;
+      mt->no_ccs = false;
       assert(brw->gen < 8 || mt->halign == 16 || num_samples <= 1);
 
       /* On Gen9+ clients are not currently capable of consuming compressed
@@ -909,7 +858,7 @@ intel_update_winsys_renderbuffer_miptree(struct brw_context *intel,
     */
    if (intel_tiling_supports_non_msrt_mcs(intel, singlesample_mt->tiling) &&
        intel_miptree_supports_non_msrt_fast_clear(intel, singlesample_mt)) {
-      singlesample_mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_RESOLVED;
+      singlesample_mt->no_ccs = false;
    }
 
    if (num_samples == 0) {
@@ -1024,6 +973,7 @@ intel_miptree_release(struct intel_mipmap_tree **mt)
          free((*mt)->mcs_buf);
       }
       intel_resolve_map_clear(&(*mt)->hiz_map);
+      intel_resolve_map_clear(&(*mt)->color_resolve_map);
 
       intel_miptree_release(&(*mt)->plane[0]);
       intel_miptree_release(&(*mt)->plane[1]);
@@ -1508,7 +1458,6 @@ intel_miptree_init_mcs(struct brw_context *brw,
    void *data = mt->mcs_buf->bo->virtual;
    memset(data, init_value, mt->mcs_buf->size);
    drm_intel_bo_unmap(mt->mcs_buf->bo);
-   mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_CLEAR;
 }
 
 static struct intel_miptree_aux_buffer *
@@ -1611,6 +1560,12 @@ intel_miptree_alloc_mcs(struct brw_context *brw,
 
    intel_miptree_init_mcs(brw, mt, 0xFF);
 
+   /* Multisampled miptrees are only supported for single level. */
+   assert(mt->first_level == 0);
+   intel_miptree_set_fast_clear_state(brw, mt, mt->first_level, 0,
+                                      mt->logical_depth0,
+                                      INTEL_FAST_CLEAR_STATE_CLEAR);
+
    return true;
 }
 
@@ -1622,56 +1577,55 @@ intel_miptree_alloc_non_msrt_mcs(struct brw_context *brw,
 {
    assert(mt->mcs_buf == NULL);
    assert(!mt->disable_aux_buffers);
+   assert(!mt->no_ccs);
 
-   /* The format of the MCS buffer is opaque to the driver; all that matters
-    * is that we get its size and pitch right.  We'll pretend that the format
-    * is R32.  Since an MCS tile covers 128 blocks horizontally, and a Y-tiled
-    * R32 buffer is 32 pixels across, we'll need to scale the width down by
-    * the block width and then a further factor of 4.  Since an MCS tile
-    * covers 256 blocks vertically, and a Y-tiled R32 buffer is 32 rows high,
-    * we'll need to scale the height down by the block height and then a
-    * further factor of 8.
+   struct isl_surf temp_main_surf;
+   struct isl_surf temp_ccs_surf;
+
+   /* Create first an ISL presentation for the main color surface and let ISL
+    * calculate equivalent CCS surface against it.
     */
-   const mesa_format format = MESA_FORMAT_R_UINT32;
-   unsigned block_width_px;
-   unsigned block_height;
-   intel_get_non_msrt_mcs_alignment(mt, &block_width_px, &block_height);
-   unsigned width_divisor = block_width_px * 4;
-   unsigned height_divisor = block_height * 8;
+   intel_miptree_get_isl_surf(brw, mt, &temp_main_surf);
+   if (!isl_surf_get_ccs_surf(&brw->isl_dev, &temp_main_surf, &temp_ccs_surf))
+      return false;
 
-   /* The Skylake MCS is twice as tall as the Broadwell MCS.
-    *
-    * In pre-Skylake, each bit in the MCS contained the state of 2 cachelines
-    * in the main surface. In Skylake, it's two bits.  The extra bit
-    * doubles the MCS height, not width, because in Skylake the MCS is always
-    * Y-tiled.
-    */
-   if (brw->gen >= 9)
-      height_divisor /= 2;
+   assert(temp_ccs_surf.size &&
+          (temp_ccs_surf.size % temp_ccs_surf.row_pitch == 0));
 
-   unsigned mcs_width =
-      ALIGN(mt->logical_width0, width_divisor) / width_divisor;
-   unsigned mcs_height =
-      ALIGN(mt->logical_height0, height_divisor) / height_divisor;
-   assert(mt->logical_depth0 == 1);
+   struct intel_miptree_aux_buffer *buf = calloc(sizeof(*buf), 1);
+   if (!buf)
+      return false;
 
-   uint32_t layout_flags =
-      (brw->gen >= 8) ? MIPTREE_LAYOUT_FORCE_HALIGN16 : 0;
+   buf->size = temp_ccs_surf.size;
+   buf->pitch = temp_ccs_surf.row_pitch;
+   buf->qpitch = isl_surf_get_array_pitch_sa_rows(&temp_ccs_surf);
+
    /* In case of compression mcs buffer needs to be initialised requiring the
     * buffer to be immediately mapped to cpu space for writing. Therefore do
     * not use the gpu access flag which can cause an unnecessary delay if the
     * backing pages happened to be just used by the GPU.
     */
-   if (!is_lossless_compressed)
-      layout_flags |= MIPTREE_LAYOUT_ACCELERATED_UPLOAD;
+   const uint32_t alloc_flags =
+      is_lossless_compressed ? 0 : BO_ALLOC_FOR_RENDER;
+   uint32_t tiling = I915_TILING_Y;
+   unsigned long pitch;
 
-   mt->mcs_buf = intel_mcs_miptree_buf_create(brw, mt,
-                                              format,
-                                              mcs_width,
-                                              mcs_height,
-                                              layout_flags);
-   if (!mt->mcs_buf)
+   /* ISL has stricter set of alignment rules then the drm allocator.
+    * Therefore one can pass the ISL dimensions in terms of bytes instead of
+    * trying to recalculate based on different format block sizes.
+    */
+   buf->bo = drm_intel_bo_alloc_tiled(brw->bufmgr, "ccs-miptree",
+                                      buf->pitch, buf->size / buf->pitch,
+                                      1, &tiling, &pitch, alloc_flags);
+   if (buf->bo) {
+      assert(pitch == buf->pitch);
+      assert(tiling == I915_TILING_Y);
+   } else {
+      free(buf);
       return false;
+   }
+
+   mt->mcs_buf = buf;
 
    /* From Gen9 onwards single-sampled (non-msrt) auxiliary buffers are
     * used for lossless compression which requires similar initialisation
@@ -1688,7 +1642,6 @@ intel_miptree_alloc_non_msrt_mcs(struct brw_context *brw,
        *    Software needs to initialize MCS with zeros."
        */
       intel_miptree_init_mcs(brw, mt, 0);
-      mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_RESOLVED;
       mt->msaa_layout = INTEL_MSAA_LAYOUT_CMS;
    }
 
@@ -2180,49 +2133,184 @@ intel_miptree_all_slices_resolve_depth(struct brw_context *brw,
 					   BLORP_HIZ_OP_DEPTH_RESOLVE);
 }
 
+enum intel_fast_clear_state
+intel_miptree_get_fast_clear_state(const struct intel_mipmap_tree *mt,
+                                   unsigned level, unsigned layer)
+{
+   intel_miptree_check_level_layer(mt, level, layer);
+
+   const struct intel_resolve_map *item =
+      intel_resolve_map_const_get(&mt->color_resolve_map, level, layer);
+
+   if (!item)
+      return INTEL_FAST_CLEAR_STATE_RESOLVED;
+
+   return item->fast_clear_state;
+}
+
+static void
+intel_miptree_check_color_resolve(const struct brw_context *brw,
+                                  const struct intel_mipmap_tree *mt,
+                                  unsigned level, unsigned layer)
+{
+   if (mt->no_ccs || !mt->mcs_buf)
+      return;
+
+   /* Fast color clear is supported for mipmapped surfaces only on Gen8+. */
+   assert(brw->gen >= 8 ||
+          (level == 0 && mt->first_level == 0 && mt->last_level == 0));
+
+   /* Compression of arrayed msaa surfaces is supported. */
+   if (mt->num_samples > 1)
+      return;
+
+   /* Fast color clear is supported for non-msaa arrays only on Gen8+. */
+   assert(brw->gen >= 8 || (layer == 0 && mt->logical_depth0 == 1));
+
+   (void)level;
+   (void)layer;
+}
+
+void
+intel_miptree_set_fast_clear_state(const struct brw_context *brw,
+                                   struct intel_mipmap_tree *mt,
+                                   unsigned level,
+                                   unsigned first_layer,
+                                   unsigned num_layers,
+                                   enum intel_fast_clear_state new_state)
+{
+   /* Setting the state to resolved means removing the item from the list
+    * altogether.
+    */
+   assert(new_state != INTEL_FAST_CLEAR_STATE_RESOLVED);
+
+   intel_miptree_check_color_resolve(brw, mt, level, first_layer);
+
+   assert(first_layer + num_layers <= mt->physical_depth0);
+
+   for (unsigned i = 0; i < num_layers; i++)
+      intel_resolve_map_set(&mt->color_resolve_map, level,
+                            first_layer + i, new_state);
+}
 
 bool
-intel_miptree_resolve_color(struct brw_context *brw,
-                            struct intel_mipmap_tree *mt,
-                            int flags)
+intel_miptree_has_color_unresolved(const struct intel_mipmap_tree *mt,
+                                   unsigned start_level, unsigned num_levels,
+                                   unsigned start_layer, unsigned num_layers)
 {
+   return intel_resolve_map_find_any(&mt->color_resolve_map,
+                                     start_level, num_levels,
+                                     start_layer, num_layers) != NULL;
+}
+
+void
+intel_miptree_used_for_rendering(const struct brw_context *brw,
+                                 struct intel_mipmap_tree *mt, unsigned level,
+                                 unsigned start_layer, unsigned num_layers)
+{
+   const bool is_lossless_compressed =
+      intel_miptree_is_lossless_compressed(brw, mt);
+
+   for (unsigned i = 0; i < num_layers; ++i) {
+      const enum intel_fast_clear_state fast_clear_state =
+         intel_miptree_get_fast_clear_state(mt, level, start_layer + i);
+
+      /* If the buffer was previously in fast clear state, change it to
+       * unresolved state, since it won't be guaranteed to be clear after
+       * rendering occurs.
+       */
+      if (is_lossless_compressed ||
+          fast_clear_state == INTEL_FAST_CLEAR_STATE_CLEAR) {
+         intel_miptree_set_fast_clear_state(
+            brw, mt, level, start_layer + i, 1,
+            INTEL_FAST_CLEAR_STATE_UNRESOLVED);
+      }
+   }
+}
+
+static bool
+intel_miptree_needs_color_resolve(const struct brw_context *brw,
+                                  const struct intel_mipmap_tree *mt,
+                                  int flags)
+{
+   if (mt->no_ccs)
+      return false;
+
+   const bool is_lossless_compressed =
+      intel_miptree_is_lossless_compressed(brw, mt);
+
    /* From gen9 onwards there is new compression scheme for single sampled
     * surfaces called "lossless compressed". These don't need to be always
     * resolved.
     */
-   if ((flags & INTEL_MIPTREE_IGNORE_CCS_E) &&
-       intel_miptree_is_lossless_compressed(brw, mt))
+   if ((flags & INTEL_MIPTREE_IGNORE_CCS_E) && is_lossless_compressed)
       return false;
 
-   switch (mt->fast_clear_state) {
-   case INTEL_FAST_CLEAR_STATE_NO_MCS:
-   case INTEL_FAST_CLEAR_STATE_RESOLVED:
-      /* No resolve needed */
+   /* Fast color clear resolves only make sense for non-MSAA buffers. */
+   if (mt->msaa_layout != INTEL_MSAA_LAYOUT_NONE && !is_lossless_compressed)
       return false;
-   case INTEL_FAST_CLEAR_STATE_UNRESOLVED:
-   case INTEL_FAST_CLEAR_STATE_CLEAR:
-      /* Fast color clear resolves only make sense for non-MSAA buffers. */
-      if (mt->msaa_layout == INTEL_MSAA_LAYOUT_NONE ||
-          intel_miptree_is_lossless_compressed(brw, mt)) {
-         brw_blorp_resolve_color(brw, mt);
-         return true;
-      } else {
-         return false;
-      }
-   default:
-      unreachable("Invalid fast clear state");
-   }
+
+   return true;
 }
 
+bool
+intel_miptree_resolve_color(struct brw_context *brw,
+                            struct intel_mipmap_tree *mt, unsigned level,
+                            unsigned start_layer, unsigned num_layers,
+                            int flags)
+{
+   intel_miptree_check_color_resolve(brw, mt, level, start_layer);
+
+   if (!intel_miptree_needs_color_resolve(brw, mt, flags))
+      return false;
+
+   /* Arrayed fast clear is only supported for gen8+. */
+   assert(brw->gen >= 8 || num_layers == 1);
+
+   bool resolved = false;
+   for (unsigned i = 0; i < num_layers; ++i) {
+      intel_miptree_check_level_layer(mt, level, start_layer + i);
+
+      struct intel_resolve_map *item =
+         intel_resolve_map_get(&mt->color_resolve_map, level,
+                               start_layer + i);
+
+      if (item) {
+         assert(item->fast_clear_state != INTEL_FAST_CLEAR_STATE_RESOLVED);
+
+         brw_blorp_resolve_color(brw, mt, level, start_layer);
+         intel_resolve_map_remove(item);
+         resolved = true;
+      }
+   }
+
+   return resolved;
+}
+
+void
+intel_miptree_all_slices_resolve_color(struct brw_context *brw,
+                                       struct intel_mipmap_tree *mt,
+                                       int flags)
+{
+   if (!intel_miptree_needs_color_resolve(brw, mt, flags))
+      return;
+      
+   foreach_list_typed_safe(struct intel_resolve_map, map, link,
+                           &mt->color_resolve_map) {
+      assert(map->fast_clear_state != INTEL_FAST_CLEAR_STATE_RESOLVED);
+
+      brw_blorp_resolve_color(brw, mt, map->level, map->layer);
+      intel_resolve_map_remove(map);
+   }
+}
 
 /**
  * Make it possible to share the BO backing the given miptree with another
  * process or another miptree.
  *
  * Fast color clears are unsafe with shared buffers, so we need to resolve and
- * then discard the MCS buffer, if present.  We also set the fast_clear_state
- * to INTEL_FAST_CLEAR_STATE_NO_MCS to ensure that no MCS buffer gets
- * allocated in the future.
+ * then discard the MCS buffer, if present.  We also set the no_ccs flag to
+ * ensure that no MCS buffer gets allocated in the future.
  */
 void
 intel_miptree_make_shareable(struct brw_context *brw,
@@ -2233,11 +2321,11 @@ intel_miptree_make_shareable(struct brw_context *brw,
     * pixel data is stored.  Fortunately this code path should never be
     * reached for multisample buffers.
     */
-   assert(mt->msaa_layout == INTEL_MSAA_LAYOUT_NONE);
+   assert(mt->msaa_layout == INTEL_MSAA_LAYOUT_NONE || mt->num_samples <= 1);
 
    if (mt->mcs_buf) {
-      intel_miptree_resolve_color(brw, mt, 0);
-      mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_NO_MCS;
+      intel_miptree_all_slices_resolve_color(brw, mt, 0);
+      mt->no_ccs = true;
    }
 }
 
@@ -2393,7 +2481,7 @@ intel_miptree_map_raw(struct brw_context *brw, struct intel_mipmap_tree *mt)
    /* CPU accesses to color buffers don't understand fast color clears, so
     * resolve any pending fast color clears before we map.
     */
-   intel_miptree_resolve_color(brw, mt, 0);
+   intel_miptree_all_slices_resolve_color(brw, mt, 0);
 
    drm_intel_bo *bo = mt->bo;
 
@@ -3319,7 +3407,7 @@ intel_miptree_get_aux_isl_surf(struct brw_context *brw,
       } else if (intel_miptree_is_lossless_compressed(brw, mt)) {
          assert(brw->gen >= 9);
          *usage = ISL_AUX_USAGE_CCS_E;
-      } else if (mt->fast_clear_state != INTEL_FAST_CLEAR_STATE_NO_MCS) {
+      } else if (!mt->no_ccs) {
          *usage = ISL_AUX_USAGE_CCS_D;
       } else {
          unreachable("Invalid MCS miptree");

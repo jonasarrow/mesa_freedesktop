@@ -2172,7 +2172,6 @@ struct gl_subroutine_function
  */
 struct gl_shader_info
 {
-   bool uses_builtin_functions;
    bool uses_gl_fragcoord;
    bool redeclares_gl_fragcoord;
    bool ARB_fragment_coord_conventions_enable;
@@ -2282,6 +2281,10 @@ struct gl_shader_info
 struct gl_linked_shader
 {
    gl_shader_stage Stage;
+
+#ifdef DEBUG
+   unsigned SourceChecksum;
+#endif
 
    struct gl_program *Program;  /**< Post-compile assembly code */
 
@@ -2415,7 +2418,9 @@ struct gl_shader
    GLboolean CompileStatus;
    bool IsES;              /**< True if this shader uses GLSL ES */
 
-   GLuint SourceChecksum;       /**< for debug/logging purposes */
+#ifdef DEBUG
+   unsigned SourceChecksum;       /**< for debug/logging purposes */
+#endif
    const GLchar *Source;  /**< Source code string */
 
    GLchar *InfoLog;

@@ -1202,6 +1202,9 @@ create_new_program(struct gl_context *ctx, struct state_key *key)
 
    p.mem_ctx = ralloc_context(NULL);
    p.shader = _mesa_new_shader(0, MESA_SHADER_FRAGMENT);
+#ifdef DEBUG
+   p.shader->SourceChecksum = 0xf18ed; /* fixed */
+#endif
    p.shader->ir = new(p.shader) exec_list;
    state = new(p.shader) _mesa_glsl_parse_state(ctx, MESA_SHADER_FRAGMENT,
 						p.shader);
@@ -1258,7 +1261,6 @@ create_new_program(struct gl_context *ctx, struct state_key *key)
 
    p.shader->CompileStatus = true;
    p.shader->Version = state->language_version;
-   p.shader->info.uses_builtin_functions = state->uses_builtin_functions;
    p.shader_program->Shaders =
       (gl_shader **)malloc(sizeof(*p.shader_program->Shaders));
    p.shader_program->Shaders[0] = p.shader;

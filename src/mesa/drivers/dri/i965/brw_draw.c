@@ -386,13 +386,12 @@ brw_postdraw_set_buffers_need_resolve(struct brw_context *brw)
       struct intel_renderbuffer *irb =
          intel_renderbuffer(fb->_ColorDrawBuffers[i]);
 
-      if (irb) {
-         brw_render_cache_set_add_bo(brw, irb->mt->bo);
-
-         if (intel_miptree_is_lossless_compressed(brw, irb->mt)) {
-            irb->mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_UNRESOLVED;
-         }
-      }
+      if (!irb)
+         continue;
+     
+      brw_render_cache_set_add_bo(brw, irb->mt->bo);
+      intel_miptree_used_for_rendering(
+         brw, irb->mt, irb->mt_level, irb->mt_layer, irb->layer_count);
    }
 }
 
@@ -411,6 +410,19 @@ brw_predraw_set_aux_buffers(struct brw_context *brw)
 
       if (!irb) {
          continue;
+      }
+
+      /* For layered rendering non-compressed fast cleared buffers need to be
+       * resolved. Surface state can carry only one fast color clear value
+       * while each layer may have its own fast clear color value. For
+       * compressed buffers color value is available in the color buffer.
+       */
+      if (irb->layer_count > 1 && !irb->mt->no_ccs &&
+          !intel_miptree_is_lossless_compressed(brw, irb->mt)) {
+         assert(brw->gen >= 8);
+
+         intel_miptree_resolve_color(brw, irb->mt, irb->mt_level,
+                                     irb->mt_layer, irb->layer_count, 0);
       }
    }
 }

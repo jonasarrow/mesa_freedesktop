@@ -25,10 +25,12 @@
  * IN THE SOFTWARE.
  */
 
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include "radv_private.h"
 #include "util/strtod.h"
 
@@ -40,9 +42,40 @@
 #include "ac_llvm_util.h"
 #include "vk_format.h"
 #include "sid.h"
-#include "radv_timestamp.h"
 #include "util/debug.h"
 struct radv_dispatch_table dtable;
+
+static int
+radv_get_function_timestamp(void *ptr, uint32_t* timestamp)
+{
+	Dl_info info;
+	struct stat st;
+	if (!dladdr(ptr, &info) || !info.dli_fname) {
+		return -1;
+	}
+	if (stat(info.dli_fname, &st)) {
+		return -1;
+	}
+	*timestamp = st.st_mtim.tv_sec;
+	return 0;
+}
+
+static int
+radv_device_get_cache_uuid(enum radeon_family family, void *uuid)
+{
+	uint32_t mesa_timestamp, llvm_timestamp;
+	uint16_t f = family;
+	memset(uuid, 0, VK_UUID_SIZE);
+	if (radv_get_function_timestamp(radv_device_get_cache_uuid, &mesa_timestamp) ||
+	    radv_get_function_timestamp(LLVMInitializeAMDGPUTargetInfo, &llvm_timestamp))
+		return -1;
+
+	memcpy(uuid, &mesa_timestamp, 4);
+	memcpy((char*)uuid + 4, &llvm_timestamp, 4);
+	memcpy((char*)uuid + 8, &f, 2);
+	snprintf((char*)uuid + 10, VK_UUID_SIZE - 10, "radv");
+	return 0;
+}
 
 static VkResult
 radv_physical_device_init(struct radv_physical_device *device,
@@ -85,6 +118,12 @@ radv_physical_device_init(struct radv_physical_device *device,
 	device->ws->query_info(device->ws, &device->rad_info);
 	result = radv_init_wsi(device);
 	if (result != VK_SUCCESS) {
+		device->ws->destroy(device->ws);
+		goto fail;
+	}
+
+	if (radv_device_get_cache_uuid(device->rad_info.family, device->uuid)) {
+		radv_finish_wsi(device);
 		device->ws->destroy(device->ws);
 		goto fail;
 	}
@@ -132,8 +171,20 @@ static const VkExtensionProperties global_extensions[] = {
 
 static const VkExtensionProperties device_extensions[] = {
 	{
+		.extensionName = VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,
+		.specVersion = 1,
+	},
+	{
 		.extensionName = VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 		.specVersion = 68,
+	},
+	{
+		.extensionName = VK_AMD_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
+		.specVersion = 1,
+	},
+	{
+		.extensionName = VK_AMD_NEGATIVE_VIEWPORT_HEIGHT_EXTENSION_NAME,
+		.specVersion = 1,
 	},
 };
 
@@ -332,7 +383,7 @@ void radv_GetPhysicalDeviceFeatures(
 		.largePoints                              = true,
 		.alphaToOne                               = true,
 		.multiViewport                            = false,
-		.samplerAnisotropy                        = false, /* FINISHME */
+		.samplerAnisotropy                        = true,
 		.textureCompressionETC2                   = false,
 		.textureCompressionASTC_LDR               = false,
 		.textureCompressionBC                     = true,
@@ -359,13 +410,6 @@ void radv_GetPhysicalDeviceFeatures(
 		.variableMultisampleRate                  = false,
 		.inheritedQueries                         = false,
 	};
-}
-
-void
-radv_device_get_cache_uuid(void *uuid)
-{
-	memset(uuid, 0, VK_UUID_SIZE);
-	snprintf(uuid, VK_UUID_SIZE, "radv-%s", RADV_TIMESTAMP);
 }
 
 void radv_GetPhysicalDeviceProperties(
@@ -498,7 +542,7 @@ void radv_GetPhysicalDeviceProperties(
 	};
 
 	strcpy(pProperties->deviceName, pdevice->name);
-	radv_device_get_cache_uuid(pProperties->pipelineCacheUUID);
+	memcpy(pProperties->pipelineCacheUUID, pdevice->uuid, VK_UUID_SIZE);
 }
 
 void radv_GetPhysicalDeviceQueueFamilyProperties(
@@ -634,6 +678,7 @@ VkResult radv_CreateDevice(
 	}
 	device->allow_fast_clears = env_var_as_boolean("RADV_FAST_CLEARS", false);
 	device->allow_dcc = !env_var_as_boolean("RADV_DCC_DISABLE", false);
+	device->shader_stats_dump = env_var_as_boolean("RADV_SHADER_STATS", false);
 
 	if (device->allow_fast_clears && device->allow_dcc)
 		radv_finishme("DCC fast clears have not been tested\n");
@@ -1772,14 +1817,7 @@ radv_init_sampler(struct radv_device *device,
 	uint32_t max_aniso = pCreateInfo->anisotropyEnable && pCreateInfo->maxAnisotropy > 1.0 ?
 					(uint32_t) pCreateInfo->maxAnisotropy : 0;
 	uint32_t max_aniso_ratio = radv_tex_aniso_filter(max_aniso);
-	bool is_vi;
-	is_vi = (device->instance->physicalDevice.rad_info.chip_class >= VI);
-
-	if (!is_vi && max_aniso > 0) {
-		radv_finishme("Anisotropic filtering must be disabled manually "
-		              "by the shader on SI-CI when BASE_LEVEL == LAST_LEVEL\n");
-		max_aniso = max_aniso_ratio = 0;
-	}
+	bool is_vi = (device->instance->physicalDevice.rad_info.chip_class >= VI);
 
 	sampler->state[0] = (S_008F30_CLAMP_X(radv_tex_wrap(pCreateInfo->addressModeU)) |
 			     S_008F30_CLAMP_Y(radv_tex_wrap(pCreateInfo->addressModeV)) |

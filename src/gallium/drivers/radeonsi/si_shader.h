@@ -295,9 +295,12 @@ struct si_shader_selector {
 	/* CS parameters */
 	unsigned local_size;
 
-	/* masks of "get_unique_index" bits */
-	uint64_t	outputs_written;
-	uint32_t	patch_outputs_written;
+	uint64_t	outputs_written;	/* "get_unique_index" bits */
+	uint32_t	patch_outputs_written;	/* "get_unique_index" bits */
+	uint32_t	outputs_written2;	/* "get_unique_index2" bits */
+
+	uint64_t	inputs_read;		/* "get_unique_index" bits */
+	uint32_t	inputs_read2;		/* "get_unique_index2" bits */
 };
 
 /* Valid shader configurations:
@@ -319,18 +322,11 @@ struct si_vs_prolog_bits {
 /* Common VS bits between the shader key and the epilog key. */
 struct si_vs_epilog_bits {
 	unsigned	export_prim_id:1; /* when PS needs it and GS is disabled */
-	/* TODO:
-	 * - skip clipdist, culldist (including clipvertex code) exports based
-	 *   on which clip_plane_enable bits are set
-	 * - skip layer, viewport, clipdist, and culldist parameter exports
-	 *   if PS doesn't read them
-	 */
 };
 
 /* Common TCS bits between the shader key and the epilog key. */
 struct si_tcs_epilog_bits {
 	unsigned	prim_mode:3;
-	uint64_t	inputs_to_copy;
 };
 
 struct si_gs_prolog_bits {
@@ -398,30 +394,53 @@ union si_shader_part_key {
 	} ps_epilog;
 };
 
-union si_shader_key {
-	struct {
-		struct si_ps_prolog_bits prolog;
-		struct si_ps_epilog_bits epilog;
-	} ps;
-	struct {
-		struct si_vs_prolog_bits prolog;
-		struct si_vs_epilog_bits epilog;
-		unsigned	as_es:1; /* export shader */
-		unsigned	as_ls:1; /* local shader */
+struct si_shader_key {
+	/* Prolog and epilog flags. */
+	union {
+		struct {
+			struct si_ps_prolog_bits prolog;
+			struct si_ps_epilog_bits epilog;
+		} ps;
+		struct {
+			struct si_vs_prolog_bits prolog;
+			struct si_vs_epilog_bits epilog;
+		} vs;
+		struct {
+			struct si_tcs_epilog_bits epilog;
+		} tcs; /* tessellation control shader */
+		struct {
+			struct si_vs_epilog_bits epilog; /* same as VS */
+		} tes; /* tessellation evaluation shader */
+		struct {
+			struct si_gs_prolog_bits prolog;
+		} gs;
+	} part;
 
-		/* One pair of bits for every input: SI_FIX_FETCH_* enums. */
-		uint32_t	fix_fetch;
-	} vs;
-	struct {
-		struct si_tcs_epilog_bits epilog;
-	} tcs; /* tessellation control shader */
-	struct {
-		struct si_vs_epilog_bits epilog; /* same as VS */
-		unsigned	as_es:1; /* export shader */
-	} tes; /* tessellation evaluation shader */
-	struct {
-		struct si_gs_prolog_bits prolog;
-	} gs;
+	/* These two are initially set according to the NEXT_SHADER property,
+	 * or guessed if the property doesn't seem correct.
+	 */
+	unsigned as_es:1; /* export shader */
+	unsigned as_ls:1; /* local shader */
+
+	/* Flags for monolithic compilation only. */
+	union {
+		struct {
+			/* One pair of bits for every input: SI_FIX_FETCH_* enums. */
+			uint32_t	fix_fetch;
+		} vs;
+		struct {
+			uint64_t	inputs_to_copy; /* for fixed-func TCS */
+		} tcs;
+	} mono;
+
+	/* Optimization flags for asynchronous compilation only. */
+	union {
+		struct {
+			uint64_t	kill_outputs; /* "get_unique_index" bits */
+			uint32_t	kill_outputs2; /* "get_unique_index2" bits */
+			unsigned	clip_disable:1;
+		} hw_vs; /* HW VS (it can be VS, TES, GS) */
+	} opt;
 };
 
 struct si_shader_config {
@@ -447,6 +466,7 @@ enum {
 	EXP_PARAM_DEFAULT_VAL_0001,
 	EXP_PARAM_DEFAULT_VAL_1110,
 	EXP_PARAM_DEFAULT_VAL_1111,
+	EXP_PARAM_UNDEFINED = 255,
 };
 
 /* GCN-specific shader info. */
@@ -470,7 +490,11 @@ struct si_shader {
 	struct si_pm4_state		*pm4;
 	struct r600_resource		*bo;
 	struct r600_resource		*scratch_bo;
-	union si_shader_key		key;
+	struct si_shader_key		key;
+	struct util_queue_fence		optimized_ready;
+	bool				compilation_failed;
+	bool				is_monolithic;
+	bool				is_optimized;
 	bool				is_binary_shared;
 	bool				is_gs_copy_shader;
 
@@ -517,6 +541,7 @@ int si_compile_llvm(struct si_screen *sscreen,
 		    const char *name);
 void si_shader_destroy(struct si_shader *shader);
 unsigned si_shader_io_get_unique_index(unsigned semantic_name, unsigned index);
+unsigned si_shader_io_get_unique_index2(unsigned name, unsigned index);
 int si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader);
 void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
 		    struct pipe_debug_callback *debug, unsigned processor,

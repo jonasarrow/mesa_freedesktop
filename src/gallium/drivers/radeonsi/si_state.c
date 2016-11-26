@@ -119,7 +119,7 @@ static void si_emit_cb_render_state(struct si_context *sctx, struct r600_atom *a
 	if (sctx->b.family == CHIP_STONEY) {
 		unsigned spi_shader_col_format =
 			sctx->ps_shader.cso ?
-			sctx->ps_shader.current->key.ps.epilog.spi_shader_col_format : 0;
+			sctx->ps_shader.current->key.part.ps.epilog.spi_shader_col_format : 0;
 		unsigned sx_ps_downconvert = 0;
 		unsigned sx_blend_opt_epsilon = 0;
 		unsigned sx_blend_opt_control = 0;
@@ -644,12 +644,23 @@ static void si_emit_clip_state(struct si_context *sctx, struct r600_atom *atom)
 static void si_emit_clip_regs(struct si_context *sctx, struct r600_atom *atom)
 {
 	struct radeon_winsys_cs *cs = sctx->b.gfx.cs;
+	struct si_shader *vs = si_get_vs_state(sctx);
 	struct tgsi_shader_info *info = si_get_vs_info(sctx);
+	struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
 	unsigned window_space =
 	   info->properties[TGSI_PROPERTY_VS_WINDOW_SPACE_POSITION];
 	unsigned clipdist_mask =
 		info->writes_clipvertex ? SIX_BITS : info->clipdist_writemask;
-	unsigned total_mask = clipdist_mask | (info->culldist_writemask << info->num_written_clipdistance);
+	unsigned ucp_mask = clipdist_mask ? 0 : rs->clip_plane_enable & SIX_BITS;
+	unsigned culldist_mask = info->culldist_writemask << info->num_written_clipdistance;
+	unsigned total_mask;
+
+	if (vs->key.opt.hw_vs.clip_disable) {
+		assert(!info->culldist_writemask);
+		clipdist_mask = 0;
+		culldist_mask = 0;
+	}
+	total_mask = clipdist_mask | culldist_mask;
 
 	radeon_set_context_reg(cs, R_02881C_PA_CL_VS_OUT_CNTL,
 		S_02881C_USE_VTX_POINT_SIZE(info->writes_psize) |
@@ -663,12 +674,11 @@ static void si_emit_clip_regs(struct si_context *sctx, struct r600_atom *atom)
 					    info->writes_layer ||
 					     info->writes_viewport_index) |
 		S_02881C_VS_OUT_MISC_SIDE_BUS_ENA(1) |
-		(sctx->queued.named.rasterizer->clip_plane_enable &
-		 clipdist_mask) | (info->culldist_writemask << 8));
+		(rs->clip_plane_enable &
+		 clipdist_mask) | (culldist_mask << 8));
 	radeon_set_context_reg(cs, R_028810_PA_CL_CLIP_CNTL,
-		sctx->queued.named.rasterizer->pa_cl_clip_cntl |
-		(clipdist_mask ? 0 :
-		 sctx->queued.named.rasterizer->clip_plane_enable & SIX_BITS) |
+		rs->pa_cl_clip_cntl |
+		ucp_mask |
 		S_028810_CLIP_DISABLE(window_space));
 
 	/* reuse needs to be set off if we write oViewport */
@@ -2350,6 +2360,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 	si_dec_framebuffer_counters(&sctx->framebuffer.state);
 	util_copy_framebuffer_state(&sctx->framebuffer.state, state);
 
+	sctx->framebuffer.colorbuf_enabled_4bit = 0;
 	sctx->framebuffer.spi_shader_col_format = 0;
 	sctx->framebuffer.spi_shader_col_format_alpha = 0;
 	sctx->framebuffer.spi_shader_col_format_blend = 0;
@@ -2372,6 +2383,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 			si_initialize_color_surface(sctx, surf);
 		}
 
+		sctx->framebuffer.colorbuf_enabled_4bit |= 0xf << (i * 4);
 		sctx->framebuffer.spi_shader_col_format |=
 			surf->spi_shader_col_format << (i * 4);
 		sctx->framebuffer.spi_shader_col_format_alpha |=

@@ -263,7 +263,7 @@ intel_update_state(struct gl_context * ctx, GLuint new_state)
        */
       const int flags = intel_texture_view_requires_resolve(brw, tex_obj) ?
                            0 : INTEL_MIPTREE_IGNORE_CCS_E;
-      intel_miptree_resolve_color(brw, tex_obj->mt, flags);
+      intel_miptree_all_slices_resolve_color(brw, tex_obj->mt, flags);
       brw_render_cache_set_check_flush(brw, tex_obj->mt->bo);
 
       if (tex_obj->base.StencilSampling ||
@@ -291,7 +291,7 @@ intel_update_state(struct gl_context * ctx, GLuint new_state)
                 * compressed surfaces need to be resolved prior to accessing
                 * them. Hence skip setting INTEL_MIPTREE_IGNORE_CCS_E.
                 */
-               intel_miptree_resolve_color(brw, tex_obj->mt, 0);
+               intel_miptree_all_slices_resolve_color(brw, tex_obj->mt, 0);
 
                if (intel_miptree_is_lossless_compressed(brw, tex_obj->mt) &&
                    intel_disable_rb_aux_buffer(brw, tex_obj->mt->bo)) {
@@ -316,8 +316,9 @@ intel_update_state(struct gl_context * ctx, GLuint new_state)
             intel_renderbuffer(fb->_ColorDrawBuffers[i]);
 
          if (irb &&
-             intel_miptree_resolve_color(brw, irb->mt,
-                                         INTEL_MIPTREE_IGNORE_CCS_E))
+             intel_miptree_resolve_color(
+                brw, irb->mt, irb->mt_level, irb->mt_layer, irb->layer_count,
+                INTEL_MIPTREE_IGNORE_CCS_E))
             brw_render_cache_set_check_flush(brw, irb->mt->bo);
       }
    }
@@ -348,7 +349,7 @@ intel_update_state(struct gl_context * ctx, GLuint new_state)
           * should be impossible to get here with such surfaces.
           */
          assert(!intel_miptree_is_lossless_compressed(brw, mt));
-         intel_miptree_resolve_color(brw, mt, 0);
+         intel_miptree_all_slices_resolve_color(brw, mt, 0);
          brw_render_cache_set_check_flush(brw, mt->bo);
       }
    }
@@ -1349,10 +1350,13 @@ intel_resolve_for_dri2_flush(struct brw_context *brw,
       rb = intel_get_renderbuffer(fb, buffers[i]);
       if (rb == NULL || rb->mt == NULL)
          continue;
-      if (rb->mt->num_samples <= 1)
-         intel_miptree_resolve_color(brw, rb->mt, 0);
-      else
+      if (rb->mt->num_samples <= 1) {
+         assert(rb->mt_layer == 0 && rb->mt_level == 0 &&
+                rb->layer_count == 1);
+         intel_miptree_resolve_color(brw, rb->mt, 0, 0, 1, 0);
+      } else {
          intel_renderbuffer_downsample(brw, rb);
+      }
    }
 }
 

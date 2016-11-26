@@ -55,7 +55,9 @@ fs_visitor::nir_setup_outputs()
       return;
 
    nir_foreach_variable(var, &nir->outputs) {
-      const unsigned vec4s = type_size_vec4(var->type);
+      const unsigned vec4s =
+         var->data.compact ? DIV_ROUND_UP(glsl_get_length(var->type), 4)
+                           : type_size_vec4(var->type);
       fs_reg reg = bld.vgrf(BRW_REGISTER_TYPE_F, 4 * vec4s);
       for (unsigned i = 0; i < vec4s; i++) {
          if (outputs[var->data.driver_location + i].file == BAD_FILE)
@@ -3256,6 +3258,11 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
       bld.MOV(offset(dest, bld, 1), offset(sample_pos, bld, 1));
       break;
    }
+
+   case nir_intrinsic_load_layer_id:
+      dest.type = BRW_REGISTER_TYPE_UD;
+      bld.MOV(dest, fetch_render_target_array_index(bld));
+      break;
 
    case nir_intrinsic_load_helper_invocation:
    case nir_intrinsic_load_sample_mask_in:

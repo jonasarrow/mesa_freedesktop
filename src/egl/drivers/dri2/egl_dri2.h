@@ -199,7 +199,7 @@ struct dri2_egl_display
 
 #ifdef HAVE_X11_PLATFORM
    xcb_connection_t         *conn;
-   int                      screen;
+   xcb_screen_t             *screen;
    int                      swap_available;
 #ifdef HAVE_DRI3
    struct loader_dri3_extensions loader_dri3_ext;
@@ -217,6 +217,10 @@ struct dri2_egl_display
    int                       formats;
    uint32_t                  capabilities;
    char                     *device_name;
+#endif
+
+#ifdef HAVE_ANDROID_PLATFORM
+   const gralloc_module_t *gralloc;
 #endif
 
    int                       is_render_node;

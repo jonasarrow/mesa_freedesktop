@@ -179,7 +179,6 @@ anv_physical_device_init(struct anv_physical_device *device,
    if (result != VK_SUCCESS)
        goto fail;
 
-   /* XXX: Actually detect bit6 swizzling */
    isl_device_init(&device->isl_dev, &device->info, swizzled);
 
    return VK_SUCCESS;
@@ -439,8 +438,8 @@ void anv_GetPhysicalDeviceFeatures(
       .shaderStorageImageArrayDynamicIndexing   = true,
       .shaderStorageImageReadWithoutFormat      = false,
       .shaderStorageImageWriteWithoutFormat     = true,
-      .shaderClipDistance                       = false,
-      .shaderCullDistance                       = false,
+      .shaderClipDistance                       = true,
+      .shaderCullDistance                       = true,
       .shaderFloat64                            = false,
       .shaderInt64                              = false,
       .shaderInt16                              = false,
@@ -576,9 +575,9 @@ void anv_GetPhysicalDeviceProperties(
       .maxSampleMaskWords                       = 1,
       .timestampComputeAndGraphics              = false,
       .timestampPeriod                          = time_stamp_base,
-      .maxClipDistances                         = 0 /* FIXME */,
-      .maxCullDistances                         = 0 /* FIXME */,
-      .maxCombinedClipAndCullDistances          = 0 /* FIXME */,
+      .maxClipDistances                         = 8,
+      .maxCullDistances                         = 8,
+      .maxCombinedClipAndCullDistances          = 8,
       .discreteQueuePriorities                  = 1,
       .pointSizeRange                           = { 0.125, 255.875 },
       .lineWidthRange                           = { 0.0, 7.9921875 },
@@ -1008,10 +1007,11 @@ VkResult anv_EnumerateInstanceExtensionProperties(
       return VK_SUCCESS;
    }
 
-   assert(*pPropertyCount >= ARRAY_SIZE(global_extensions));
+   *pPropertyCount = MIN2(*pPropertyCount, ARRAY_SIZE(global_extensions));
+   typed_memcpy(pProperties, global_extensions, *pPropertyCount);
 
-   *pPropertyCount = ARRAY_SIZE(global_extensions);
-   memcpy(pProperties, global_extensions, sizeof(global_extensions));
+   if (*pPropertyCount < ARRAY_SIZE(global_extensions))
+      return VK_INCOMPLETE;
 
    return VK_SUCCESS;
 }
@@ -1027,10 +1027,11 @@ VkResult anv_EnumerateDeviceExtensionProperties(
       return VK_SUCCESS;
    }
 
-   assert(*pPropertyCount >= ARRAY_SIZE(device_extensions));
+   *pPropertyCount = MIN2(*pPropertyCount, ARRAY_SIZE(device_extensions));
+   typed_memcpy(pProperties, device_extensions, *pPropertyCount);
 
-   *pPropertyCount = ARRAY_SIZE(device_extensions);
-   memcpy(pProperties, device_extensions, sizeof(device_extensions));
+   if (*pPropertyCount < ARRAY_SIZE(device_extensions))
+      return VK_INCOMPLETE;
 
    return VK_SUCCESS;
 }

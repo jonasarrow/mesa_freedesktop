@@ -805,6 +805,19 @@ emit_cb_state(struct anv_pipeline *pipeline,
    }
 }
 
+/**
+ * Get the brw_vue_prog_data for the last stage which outputs VUEs.
+ */
+static inline struct brw_vue_prog_data *
+get_last_vue_prog_data(struct anv_pipeline *pipeline)
+{
+   for (int s = MESA_SHADER_GEOMETRY; s >= 0; s--) {
+      if (pipeline->shaders[s])
+         return (struct brw_vue_prog_data *) pipeline->shaders[s]->prog_data;
+   }
+   return NULL;
+}
+
 static void
 emit_3dstate_clip(struct anv_pipeline *pipeline,
                   const VkPipelineViewportStateCreateInfo *vp_info,
@@ -832,6 +845,11 @@ emit_3dstate_clip(struct anv_pipeline *pipeline,
       clip.FrontWinding            = vk_to_gen_front_face[rs_info->frontFace];
       clip.CullMode                = vk_to_gen_cullmode[rs_info->cullMode];
       clip.ViewportZClipTestEnable = !pipeline->depth_clamp_enable;
+      const struct brw_vue_prog_data *last = get_last_vue_prog_data(pipeline);
+      if (last) {
+         clip.UserClipDistanceClipTestEnableBitmask = last->clip_distance_mask;
+         clip.UserClipDistanceCullTestEnableBitmask = last->cull_distance_mask;
+      }
 #else
       clip.NonPerspectiveBarycentricEnable = wm_prog_data ?
          (wm_prog_data->barycentric_interp_modes & 0x38) != 0 : 0;
@@ -934,9 +952,10 @@ emit_3dstate_vs(struct anv_pipeline *pipeline)
       vs.VertexURBEntryOutputReadOffset = get_urb_output_offset();
       vs.VertexURBEntryOutputLength     = get_urb_output_length(vs_bin);
 
-     /* TODO */
-      vs.UserClipDistanceClipTestEnableBitmask = 0;
-      vs.UserClipDistanceCullTestEnableBitmask = 0;
+      vs.UserClipDistanceClipTestEnableBitmask =
+         vs_prog_data->base.clip_distance_mask;
+      vs.UserClipDistanceCullTestEnableBitmask =
+         vs_prog_data->base.cull_distance_mask;
 #endif
 
       vs.PerThreadScratchSpace   = get_scratch_space(vs_bin);
@@ -1007,9 +1026,10 @@ emit_3dstate_gs(struct anv_pipeline *pipeline)
       gs.VertexURBEntryOutputReadOffset = get_urb_output_offset();
       gs.VertexURBEntryOutputLength     = get_urb_output_length(gs_bin);
 
-     /* TODO */
-      gs.UserClipDistanceClipTestEnableBitmask = 0;
-      gs.UserClipDistanceCullTestEnableBitmask = 0;
+      gs.UserClipDistanceClipTestEnableBitmask =
+         gs_prog_data->base.clip_distance_mask;
+      gs.UserClipDistanceCullTestEnableBitmask =
+         gs_prog_data->base.cull_distance_mask;
 #endif
 
       gs.PerThreadScratchSpace   = get_scratch_space(gs_bin);
@@ -1019,7 +1039,7 @@ emit_3dstate_gs(struct anv_pipeline *pipeline)
 }
 
 static void
-emit_3dstate_wm(struct anv_pipeline *pipeline,
+emit_3dstate_wm(struct anv_pipeline *pipeline, struct anv_subpass *subpass,
                 const VkPipelineMultisampleStateCreateInfo *multisample)
 {
    const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
@@ -1049,11 +1069,20 @@ emit_3dstate_wm(struct anv_pipeline *pipeline,
          /* FIXME: This needs a lot more work, cf gen7 upload_wm_state(). */
          wm.ThreadDispatchEnable          = true;
 
-         wm.PixelShaderKillsPixel         = wm_prog_data->uses_kill;
          wm.PixelShaderComputedDepthMode  = wm_prog_data->computed_depth_mode;
          wm.PixelShaderUsesSourceDepth    = wm_prog_data->uses_src_depth;
          wm.PixelShaderUsesSourceW        = wm_prog_data->uses_src_w;
          wm.PixelShaderUsesInputCoverageMask = wm_prog_data->uses_sample_mask;
+
+         /* If the subpass has a depth or stencil self-dependency, then we
+          * need to force the hardware to do the depth/stencil write *after*
+          * fragment shader execution.  Otherwise, the writes may hit memory
+          * before we get around to fetching from the input attachment and we
+          * may get the depth or stencil value from the current draw rather
+          * than the previous one.
+          */
+         wm.PixelShaderKillsPixel         = subpass->has_ds_self_dep ||
+                                            wm_prog_data->uses_kill;
 
          if (samples > 1) {
             wm.MultisampleRasterizationMode = MSRASTMODE_ON_PATTERN;
@@ -1071,8 +1100,18 @@ emit_3dstate_wm(struct anv_pipeline *pipeline,
    }
 }
 
+static bool
+is_dual_src_blend_factor(VkBlendFactor factor)
+{
+   return factor == VK_BLEND_FACTOR_SRC1_COLOR ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR ||
+          factor == VK_BLEND_FACTOR_SRC1_ALPHA ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+}
+
 static void
-emit_3dstate_ps(struct anv_pipeline *pipeline)
+emit_3dstate_ps(struct anv_pipeline *pipeline,
+                const VkPipelineColorBlendStateCreateInfo *blend)
 {
    MAYBE_UNUSED const struct gen_device_info *devinfo = &pipeline->device->info;
    const struct anv_shader_bin *fs_bin =
@@ -1091,6 +1130,26 @@ emit_3dstate_ps(struct anv_pipeline *pipeline)
    }
 
    const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
+
+#if GEN_GEN < 8
+   /* The hardware wedges if you have this bit set but don't turn on any dual
+    * source blend factors.
+    */
+   bool dual_src_blend = false;
+   if (wm_prog_data->dual_src_blend) {
+      for (uint32_t i = 0; i < blend->attachmentCount; i++) {
+         VkPipelineColorBlendAttachmentState *bstate = &blend->pAttachments[i];
+         if (bstate->blendEnable &&
+             (is_dual_src_blend_factor(bstate->srcColorBlendFactor) ||
+              is_dual_src_blend_factor(bstate->dstColorBlendFactor) ||
+              is_dual_src_blend_factor(bstate->srcAlphaBlendFactor) ||
+              is_dual_src_blend_factor(bstate->dstAlphaBlendFactor))) {
+            dual_src_blend = true;
+            break;
+         }
+      }
+   }
+#endif
 
    anv_batch_emit(&pipeline->batch, GENX(3DSTATE_PS), ps) {
       ps.KernelStartPointer0        = fs_bin->kernel.offset;
@@ -1111,7 +1170,7 @@ emit_3dstate_ps(struct anv_pipeline *pipeline)
 #if GEN_GEN < 8
       ps.AttributeEnable            = wm_prog_data->num_varying_inputs > 0;
       ps.oMaskPresenttoRenderTarget = wm_prog_data->uses_omask;
-      ps.DualSourceBlendEnable      = wm_prog_data->dual_src_blend;
+      ps.DualSourceBlendEnable      = dual_src_blend;
 #endif
 
 #if GEN_IS_HASWELL
@@ -1143,7 +1202,8 @@ emit_3dstate_ps(struct anv_pipeline *pipeline)
 
 #if GEN_GEN >= 8
 static void
-emit_3dstate_ps_extra(struct anv_pipeline *pipeline)
+emit_3dstate_ps_extra(struct anv_pipeline *pipeline,
+                      struct anv_subpass *subpass)
 {
    const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
 
@@ -1157,10 +1217,18 @@ emit_3dstate_ps_extra(struct anv_pipeline *pipeline)
       ps.AttributeEnable               = wm_prog_data->num_varying_inputs > 0;
       ps.oMaskPresenttoRenderTarget    = wm_prog_data->uses_omask;
       ps.PixelShaderIsPerSample        = wm_prog_data->persample_dispatch;
-      ps.PixelShaderKillsPixel         = wm_prog_data->uses_kill;
       ps.PixelShaderComputedDepthMode  = wm_prog_data->computed_depth_mode;
       ps.PixelShaderUsesSourceDepth    = wm_prog_data->uses_src_depth;
       ps.PixelShaderUsesSourceW        = wm_prog_data->uses_src_w;
+
+      /* If the subpass has a depth or stencil self-dependency, then we need
+       * to force the hardware to do the depth/stencil write *after* fragment
+       * shader execution.  Otherwise, the writes may hit memory before we get
+       * around to fetching from the input attachment and we may get the depth
+       * or stencil value from the current draw rather than the previous one.
+       */
+      ps.PixelShaderKillsPixel         = subpass->has_ds_self_dep ||
+                                         wm_prog_data->uses_kill;
 
 #if GEN_GEN >= 9
       ps.PixelShaderPullsBary    = wm_prog_data->pulls_bary;
@@ -1247,10 +1315,10 @@ genX(graphics_pipeline_create)(
    emit_3dstate_vs(pipeline);
    emit_3dstate_gs(pipeline);
    emit_3dstate_sbe(pipeline);
-   emit_3dstate_wm(pipeline, pCreateInfo->pMultisampleState);
-   emit_3dstate_ps(pipeline);
+   emit_3dstate_wm(pipeline, subpass, pCreateInfo->pMultisampleState);
+   emit_3dstate_ps(pipeline, pCreateInfo->pColorBlendState);
 #if GEN_GEN >= 8
-   emit_3dstate_ps_extra(pipeline);
+   emit_3dstate_ps_extra(pipeline, subpass);
    emit_3dstate_vf_topology(pipeline);
 #endif
 
