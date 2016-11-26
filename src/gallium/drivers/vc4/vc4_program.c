@@ -400,6 +400,105 @@ ntq_emit_txf(struct vc4_compile *c, nir_tex_instr *instr)
         }
 }
 
+static struct qreg ntq_ffract(struct vc4_compile *c, struct qreg instr);
+
+/* For raster textures, we need to do the texturing manually,
+ * Currently, all settings are ignored, The texture is
+ * clamped at the border with no border color and lod is fixed
+ * at level 0. Improve, if you want.*/
+static void
+ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
+{
+        struct qreg s, t;
+        unsigned unit = instr->texture_index;
+
+        for (unsigned i = 0; i < instr->num_srcs; i++) {
+                switch (instr->src[i].src_type) {
+                case nir_tex_src_coord:
+                        s = ntq_get_src(c, instr->src[i].src, 0);
+                        if (instr->sampler_dim == GLSL_SAMPLER_DIM_1D)
+                                t = qir_uniform_f(c, 0.5);
+                        else
+                                t = ntq_get_src(c, instr->src[i].src, 1);
+                        if (instr->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+                                abort();
+                        break;
+                /* Not implemented */
+                case nir_tex_src_bias:
+                case nir_tex_src_lod:
+                case nir_tex_src_comparitor:
+                        break;
+                default:
+                        unreachable("unknown texture source");
+                }
+        }
+
+        /* There is no native support for GL texture rectangle coordinates, so
+        * we have to rescale from ([0, width], [0, height]) to ([0, 1], [0,
+        * 1]).
+        */
+        if (instr->sampler_dim == GLSL_SAMPLER_DIM_RECT) {
+                s = qir_FMUL(c, s,
+                        qir_uniform(c, QUNIFORM_TEXRECT_SCALE_X, unit));
+                t = qir_FMUL(c, t,
+                        qir_uniform(c, QUNIFORM_TEXRECT_SCALE_Y, unit));
+        }
+
+        /* Wrapping*/
+        switch (c->key->tex[unit].wrap_s) {
+        case PIPE_TEX_WRAP_CLAMP:
+                s = qir_SAT(c, s);
+                break;
+        case PIPE_TEX_WRAP_REPEAT:
+                s = ntq_ffract(c, s);
+                break;
+        default:
+                /* Not implemented */
+                break;
+        }
+
+        switch (c->key->tex[unit].wrap_t) {
+        case PIPE_TEX_WRAP_CLAMP:
+                t = qir_SAT(c, t);
+                break;
+        case PIPE_TEX_WRAP_REPEAT:
+                t = ntq_ffract(c, t);
+                break;
+        default:
+                /* Not implemented */
+                break;
+        }
+
+
+        /* Compute adress */
+        s = qir_FMUL(c, s, qir_uniform_f(c, (float)c->key[unit].tex->width));
+        t = qir_FMUL(c, t, qir_uniform_f(c, (float)c->key[unit].tex->height));
+        s = qir_FTOI(c, s);
+        t = qir_FTOI(c, t);
+
+        /* (y*stride+x)*sizeof(elem) */
+        struct qreg addr = qir_SHL(c,
+                qir_ADD(c,
+                        qir_MUL24(c, t,
+                                qir_uniform_ui(c, c->key[unit].tex->width)),
+                        s),
+                        qir_uniform_ui(c, 2));
+        /* Clamp as required from the kernel */
+        addr = qir_MAX(c, addr, qir_uniform_ui(c, 0));
+        addr = qir_MIN(c, addr, qir_uniform_ui(c,
+                c->key[unit].tex->width*c->key[unit].tex->height * 4 - 4));
+
+        qir_TEX_DIRECT(c, addr, qir_uniform(c, QUNIFORM_TEXTURE_MSAA_ADDR, unit));
+
+        ntq_emit_thrsw(c);
+        struct qreg tex = qir_TEX_RESULT(c);
+        c->num_texture_samples++;
+
+        struct qreg *dest = ntq_get_dest(c, &instr->dest);
+        for (int i = 0; i < 4; i++)
+                dest[i] = qir_UNPACK_8_F(c, tex, i);
+}
+
 static void
 ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
 {
@@ -409,6 +508,11 @@ ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
 
         if (instr->op == nir_texop_txf) {
                 ntq_emit_txf(c, instr);
+                return;
+        }
+
+        if (c->key->tex[unit].vc4_format == VC4_TEXTURE_TYPE_RGBA32R) {
+                ntq_emit_tex_manual(c, instr);
                 return;
         }
 
@@ -2613,6 +2717,12 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
                         continue;
 
                 key->tex[i].format = sampler->format;
+                key->tex[i].vc4_format = vc4_resource(sampler->texture)->vc4_format;
+                key->tex[i].width = sampler->texture->width0;
+                key->tex[i].height = sampler->texture->height0;
+                key->tex[i].minfilter = sampler_state->min_img_filter;
+                key->tex[i].magfilter = sampler_state->mag_img_filter;
+                key->tex[i].mipfilter = sampler_state->min_mip_filter;
                 key->tex[i].swizzle[0] = sampler->swizzle_r;
                 key->tex[i].swizzle[1] = sampler->swizzle_g;
                 key->tex[i].swizzle[2] = sampler->swizzle_b;

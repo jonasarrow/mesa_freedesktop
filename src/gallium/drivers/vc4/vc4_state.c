@@ -571,8 +571,7 @@ vc4_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
          * so we also have to copy to a temporary then.
          */
         if ((cso->u.tex.first_level &&
-             (cso->u.tex.first_level != cso->u.tex.last_level)) ||
-            rsc->vc4_format == VC4_TEXTURE_TYPE_RGBA32R) {
+             (cso->u.tex.first_level != cso->u.tex.last_level))) {
                 struct vc4_resource *shadow_parent = vc4_resource(prsc);
                 struct pipe_resource tmpl = shadow_parent->base.b;
                 struct vc4_resource *clone;
