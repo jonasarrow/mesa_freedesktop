@@ -958,20 +958,21 @@ schedule_instructions(struct vc4_compile *c,
                          * theoretically it could be only two instructions away.
                          */
 
-                         /* Remove sig from the instruction */
+                         
+                        /* Compute how far we can shift */
+                        int max_shift = MIN2(
+                                c->qpu_inst_count - 1 - last_thread_switch, 2);
+                        int shift = max_shift;
+                        /* Remove sig from the instruction */
                         c->qpu_insts[c->qpu_inst_count - 1] = QPU_UPDATE_FIELD(
                                 c->qpu_insts[c->qpu_inst_count - 1],
                                 QPU_SIG_NONE,
                                 QPU_SIG);
-                        /* Compute how far we can shift */
-                        int max_shift = MIN2(
-                                c->qpu_inst_count - 1 - last_thread_switch, 2);
                         /* If both instructions in front have a signal set,
                          * reset the signal on the current instruction.*/
-                        int shift = max_shift;
                         for (; shift >= 0; --shift) {
                                 if (QPU_GET_FIELD(
-                                        c->qpu_insts[c->qpu_inst_count - 1 - shift], QPU_SIG)
+                                        c->qpu_insts[c->qpu_inst_count - 1 - shift],  QPU_SIG)
                                         == QPU_SIG_NONE) {
                                         c->qpu_insts[c->qpu_inst_count - 1 - shift] =
                                                 QPU_UPDATE_FIELD(
@@ -984,7 +985,7 @@ schedule_instructions(struct vc4_compile *c,
                         /* If necessarry, add filling NOPs*/
                         for (int i = 0; i < 2 - shift; ++i) {
                                 update_scoreboard_for_chosen(scoreboard, qpu_NOP());
-                                qpu_serialize_one_inst(c, inst);
+                                qpu_serialize_one_inst(c, qpu_NOP());
                         }
                         /* Avoid branching in a thread switch*/
                         min_branch_position = c->qpu_inst_count;
