@@ -185,6 +185,31 @@ get_texrect_scale(struct vc4_texture_stateobj *texstate,
         return fui(1.0f / dim);
 }
 
+static uint32_t
+get_texrect_size(struct vc4_texture_stateobj *texstate,
+        enum quniform_contents contents,
+        uint32_t data)
+{
+        struct pipe_sampler_view *texture = texstate->textures[data];
+        uint32_t dim;
+
+        switch (contents) {
+        case QUNIFORM_TEXRECT_SIZE_X:
+                dim = texture->texture->width0;
+                break;
+        case QUNIFORM_TEXRECT_SIZE_Y:
+                dim = texture->texture->height0;
+                break;
+        case QUNIFORM_TEXRECT_SIZE_MINUS_4:
+                dim = texture->texture->width0 *
+                        texture->texture->height0 * 4 - 4;
+                break;
+        default:
+                break;
+        }
+        return dim;
+}
+
 static struct vc4_bo *
 vc4_upload_ubo(struct vc4_context *vc4,
                struct vc4_compiled_shader *shader,
@@ -293,6 +318,15 @@ vc4_write_uniforms(struct vc4_context *vc4, struct vc4_compiled_shader *shader,
                                                          uinfo->data[i]));
                         break;
 
+                case QUNIFORM_TEXRECT_SIZE_X:
+                case QUNIFORM_TEXRECT_SIZE_Y:
+                case QUNIFORM_TEXRECT_SIZE_MINUS_4:
+                        cl_aligned_u32(&uniforms,
+                                get_texrect_size(texstate,
+                                        uinfo->contents[i],
+                                        uinfo->data[i]));
+                        break;
+
                 case QUNIFORM_BLEND_CONST_COLOR_X:
                 case QUNIFORM_BLEND_CONST_COLOR_Y:
                 case QUNIFORM_BLEND_CONST_COLOR_Z:
@@ -395,6 +429,9 @@ vc4_set_shader_uniform_dirty_flags(struct vc4_compiled_shader *shader)
                 case QUNIFORM_TEXTURE_MSAA_ADDR:
                 case QUNIFORM_TEXRECT_SCALE_X:
                 case QUNIFORM_TEXRECT_SCALE_Y:
+                case QUNIFORM_TEXRECT_SIZE_X:
+                case QUNIFORM_TEXRECT_SIZE_Y:
+                case QUNIFORM_TEXRECT_SIZE_MINUS_4:
                         /* We could flag this on just the stage we're
                          * compiling for, but it's not passed in.
                          */

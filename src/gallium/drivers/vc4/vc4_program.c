@@ -471,8 +471,8 @@ ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
 
 
         /* Compute adress */
-        s = qir_FMUL(c, s, qir_uniform_f(c, (float)c->key[unit].tex->width));
-        t = qir_FMUL(c, t, qir_uniform_f(c, (float)c->key[unit].tex->height));
+        s = qir_FMUL(c, s, qir_ITOF(c, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit)));
+        t = qir_FMUL(c, t, qir_ITOF(c, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_Y, unit)));
         s = qir_FTOI(c, s);
         t = qir_FTOI(c, t);
 
@@ -480,13 +480,12 @@ ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
         struct qreg addr = qir_SHL(c,
                 qir_ADD(c,
                         qir_MUL24(c, t,
-                                qir_uniform_ui(c, c->key[unit].tex->width)),
+                                qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit)),
                         s),
                         qir_uniform_ui(c, 2));
         /* Clamp as required from the kernel */
         addr = qir_MAX(c, addr, qir_uniform_ui(c, 0));
-        addr = qir_MIN(c, addr, qir_uniform_ui(c,
-                c->key[unit].tex->width*c->key[unit].tex->height * 4 - 4));
+        addr = qir_MIN(c, addr, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_MINUS_4, unit));
 
         qir_TEX_DIRECT(c, addr, qir_uniform(c, QUNIFORM_TEXTURE_MSAA_ADDR, unit));
 
