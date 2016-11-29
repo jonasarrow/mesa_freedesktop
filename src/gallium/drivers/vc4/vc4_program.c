@@ -2716,8 +2716,6 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
 
                 key->tex[i].format = sampler->format;
                 key->tex[i].vc4_format = vc4_resource(sampler->texture)->vc4_format;
-                key->tex[i].width = sampler->texture->width0;
-                key->tex[i].height = sampler->texture->height0;
                 key->tex[i].minfilter = sampler_state->min_img_filter;
                 key->tex[i].magfilter = sampler_state->mag_img_filter;
                 key->tex[i].mipfilter = sampler_state->min_mip_filter;

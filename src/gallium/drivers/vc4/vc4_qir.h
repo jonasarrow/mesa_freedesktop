@@ -342,7 +342,6 @@ struct vc4_key {
         struct {
                 enum pipe_format format;
                 enum vc4_texture_data_type vc4_format;
-                uint32_t width, height;
                 enum pipe_tex_mipfilter mipfilter;
                 enum pipe_tex_filter minfilter, magfilter;
                 uint8_t swizzle[4];
