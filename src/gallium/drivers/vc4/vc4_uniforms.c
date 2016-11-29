@@ -195,10 +195,13 @@ get_texrect_size(struct vc4_texture_stateobj *texstate,
 
         switch (contents) {
         case QUNIFORM_TEXRECT_SIZE_X:
-                dim = texture->texture->width0;
+                dim = fui(texture->texture->width0);
                 break;
         case QUNIFORM_TEXRECT_SIZE_Y:
-                dim = texture->texture->height0;
+                dim = fui(texture->texture->height0);
+                break;
+        case QUNIFORM_TEXRECT_STRIDE:
+                dim = (texture->texture->width0 + 3) & ~3;
                 break;
         case QUNIFORM_TEXRECT_SIZE_MINUS_4:
                 dim = texture->texture->width0 *
@@ -320,6 +323,7 @@ vc4_write_uniforms(struct vc4_context *vc4, struct vc4_compiled_shader *shader,
 
                 case QUNIFORM_TEXRECT_SIZE_X:
                 case QUNIFORM_TEXRECT_SIZE_Y:
+                case QUNIFORM_TEXRECT_STRIDE:
                 case QUNIFORM_TEXRECT_SIZE_MINUS_4:
                         cl_aligned_u32(&uniforms,
                                 get_texrect_size(texstate,
@@ -431,6 +435,7 @@ vc4_set_shader_uniform_dirty_flags(struct vc4_compiled_shader *shader)
                 case QUNIFORM_TEXRECT_SCALE_Y:
                 case QUNIFORM_TEXRECT_SIZE_X:
                 case QUNIFORM_TEXRECT_SIZE_Y:
+                case QUNIFORM_TEXRECT_STRIDE:
                 case QUNIFORM_TEXRECT_SIZE_MINUS_4:
                         /* We could flag this on just the stage we're
                          * compiling for, but it's not passed in.

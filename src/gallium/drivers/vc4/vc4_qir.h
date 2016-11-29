@@ -282,7 +282,9 @@ enum quniform_contents {
         // Size of the texture
         QUNIFORM_TEXRECT_SIZE_X,
         QUNIFORM_TEXRECT_SIZE_Y,
-        // SIZE_X * SIZE_Y * 4 - 4
+        //round_up(SIZE_X)
+        QUNIFORM_TEXRECT_STRIDE,
+        // STRIDE * SIZE_Y * 4 - 4
         QUNIFORM_TEXRECT_SIZE_MINUS_4,
 
         QUNIFORM_TEXTURE_BORDER_COLOR,

@@ -469,10 +469,9 @@ ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
                 break;
         }
 
-
         /* Compute adress */
-        s = qir_FMUL(c, s, qir_ITOF(c, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit)));
-        t = qir_FMUL(c, t, qir_ITOF(c, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_Y, unit)));
+        s = qir_FMUL(c, s, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit));
+        t = qir_FMUL(c, t, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_Y, unit));
         s = qir_FTOI(c, s);
         t = qir_FTOI(c, t);
 
@@ -480,7 +479,7 @@ ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
         struct qreg addr = qir_SHL(c,
                 qir_ADD(c,
                         qir_MUL24(c, t,
-                                qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit)),
+                                qir_uniform(c, QUNIFORM_TEXRECT_STRIDE, unit)),
                         s),
                         qir_uniform_ui(c, 2));
         /* Clamp as required from the kernel */
