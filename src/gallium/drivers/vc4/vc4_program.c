@@ -402,6 +402,56 @@ ntq_emit_txf(struct vc4_compile *c, nir_tex_instr *instr)
 
 static struct qreg ntq_ffract(struct vc4_compile *c, struct qreg instr);
 
+/* manual wrapping of texture coordinates. val => [0, 1] */
+static struct qreg ntq_emit_tex_wrap(struct vc4_compile *c,
+                                     struct qreg val,
+                                     enum pipe_tex_wrap wrap)
+{
+        /* Currently not supporting border colors */
+        struct qreg clamped;
+        switch (wrap) {
+        case PIPE_TEX_WRAP_CLAMP:
+        case PIPE_TEX_WRAP_CLAMP_TO_EDGE:
+        case PIPE_TEX_WRAP_CLAMP_TO_BORDER:
+                clamped = qir_SAT(c, val);
+                break;
+        case PIPE_TEX_WRAP_REPEAT:
+                clamped = ntq_ffract(c, val);
+                break;
+                /* Mirror once, then clamp*/
+        case PIPE_TEX_WRAP_MIRROR_CLAMP:
+        case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
+        case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER:
+                val = qir_FMAX(c,
+                        qir_FMIN(c,
+                                val,
+                                qir_uniform_f(c, 2.0)),
+                        qir_uniform_f(c, -1.0));
+                /* Don't want to repeat myself, fall through*/
+        case PIPE_TEX_WRAP_MIRROR_REPEAT:
+                /* 1 - 2 * |(val / 2) MOD 1 - 0.5| */
+        {
+                struct qreg inner = /* (val / 2) MOD 1 - 0.5 */
+                        qir_FSUB(c,
+                                ntq_ffract(c,
+                                        qir_FMUL(c,
+                                                val,
+                                                qir_uniform_f(c, 0.5))),
+                                qir_uniform_f(c, 0.5));
+                clamped =
+                        qir_FSUB(c,
+                                qir_uniform_f(c, 1.0),
+                                qir_FMUL(c,
+                                        qir_uniform_f(c, 2.0),
+                                        qir_FMAXABS(c,
+                                                inner, inner)));
+        }
+                break;
+        default:
+                unreachable("unknown texture wrap");
+        }
+        return clamped;
+}
 /* For raster textures, we need to do the texturing manually,
  * Currently, all settings are ignored, The texture is
  * clamped at the border with no border color and lod is fixed
@@ -445,29 +495,8 @@ ntq_emit_tex_manual(struct vc4_compile *c, nir_tex_instr *instr)
         }
 
         /* Wrapping*/
-        switch (c->key->tex[unit].wrap_s) {
-        case PIPE_TEX_WRAP_CLAMP:
-                s = qir_SAT(c, s);
-                break;
-        case PIPE_TEX_WRAP_REPEAT:
-                s = ntq_ffract(c, s);
-                break;
-        default:
-                /* Not implemented */
-                break;
-        }
-
-        switch (c->key->tex[unit].wrap_t) {
-        case PIPE_TEX_WRAP_CLAMP:
-                t = qir_SAT(c, t);
-                break;
-        case PIPE_TEX_WRAP_REPEAT:
-                t = ntq_ffract(c, t);
-                break;
-        default:
-                /* Not implemented */
-                break;
-        }
+        s = ntq_emit_tex_wrap(c, s, c->key->tex[unit].wrap_s);
+        t = ntq_emit_tex_wrap(c, t, c->key->tex[unit].wrap_t);
 
         /* Compute adress */
         s = qir_FMUL(c, s, qir_uniform(c, QUNIFORM_TEXRECT_SIZE_X, unit));
