@@ -2565,6 +2565,16 @@ if test -n "$with_gallium_drivers"; then
                               [USE_VC4_SIMULATOR=yes;
                                DEFINES="$DEFINES -DUSE_VC4_SIMULATOR"],
                               [USE_VC4_SIMULATOR=no])
+            my_save_cflags="$CFLAGS"
+            CFLAGS="$CFLAGS -mfpu=neon"
+            AC_MSG_CHECKING([whether CC needs -mfpu=neon for NEON])
+            AC_COMPILE_IFELSE([AC_LANG_PROGRAM([])],
+                [AC_MSG_RESULT([yes])]
+                [HAVE_NEON_OPTIONAL=yes],
+                [AC_MSG_RESULT([no])]
+            )
+            CFLAGS="$my_save_cflags"
+            AC_SUBST([AM_CFLAGS])
             ;;
         xpl111)
             HAVE_GALLIUM_PL111=yes
@@ -2596,6 +2606,7 @@ AM_CONDITIONAL(HAVE_SWR_AVX, test "x$HAVE_SWR_AVX" = xyes)
 AM_CONDITIONAL(HAVE_SWR_AVX2, test "x$HAVE_SWR_AVX2" = xyes)
 AM_CONDITIONAL(HAVE_SWR_KNL, test "x$HAVE_SWR_KNL" = xyes)
 AM_CONDITIONAL(HAVE_SWR_SKX, test "x$HAVE_SWR_SKX" = xyes)
+AM_CONDITIONAL(HAVE_NEON_OPTIONAL, test "x$HAVE_NEON_OPTIONAL" = xyes)
 
 dnl We need to validate some needed dependencies for renderonly drivers.
 

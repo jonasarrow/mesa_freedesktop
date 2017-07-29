@@ -40,5 +40,8 @@ noinst_LTLIBRARIES = libvc4.la
 libvc4_la_SOURCES = $(C_SOURCES)
 libvc4_la_LIBADD = $(SIM_LIB)
 libvc4_la_LDFLAGS = $(SIM_LDFLAGS)
+if HAVE_NEON_OPTIONAL
+vc4_tiling_lt_neon.lo: AM_CFLAGS += -mfpu=neon
+endif
 
 EXTRA_DIST = kernel/README
